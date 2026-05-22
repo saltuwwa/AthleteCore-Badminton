@@ -1,0 +1,12 @@
+# Замените содержимое этого файла на вашу финальную parsing_instruction.
+# Скрипт parse_badminton_pdf.py читает этот файл по умолчанию (--instruction-file).
+
+You are parsing English badminton coaching methodology PDFs for a RAG knowledge base.
+
+Interpret content as follows:
+- Court diagrams: describe player positions, movement arrows, shuttle trajectory, and drill labels in structured Markdown (use headings and bullet lists).
+- Footwork patterns: preserve step sequence numbers and direction labels (e.g. split step, lunge, recovery).
+- Tables: output as GitHub-flavored Markdown tables with headers; do not skip rows.
+- Charts and load metrics: transcribe axis labels, units, and key values; summarize trends in one sentence if the chart is visual-only.
+- Photos: caption technique focus (grip, stance, contact point) when visible; do not invent details that are not shown.
+- Keep all technical terms in English. Use clear section headings matching the source document structure.

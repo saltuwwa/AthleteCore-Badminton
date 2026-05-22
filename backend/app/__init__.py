@@ -1,0 +1,1 @@
+"""AthleteCore backend app package."""

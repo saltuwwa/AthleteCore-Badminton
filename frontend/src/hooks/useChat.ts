@@ -1,0 +1,159 @@
+import axios from 'axios'
+import { useCallback, useMemo, useState } from 'react'
+import { sendMessage } from '../api/chat'
+import { agentLabel, mapAnalysisToMessage, mapAnalysisToRows } from '../lib/chatMappers'
+import { stripAnalysisJsonFromText } from '../lib/stripAnalysisJson'
+import type { AnalysisErrorRow } from '../lib/chatMappers'
+import type { ChatMessage } from '../types'
+
+const THREAD_KEY = 'athletecore-thread-id'
+const VOICE_DRAFT_ID = 'voice-draft'
+
+const chatErrorMessage = (err: unknown): string => {
+  if (axios.isAxiosError(err)) {
+    if (!err.response) {
+      return (
+        'Backend недоступен. Запусти из папки backend:\n' +
+        'uvicorn app.main:app --reload --port 8001\n' +
+        '(на Windows порт 8000 часто занят — используй 8001 и VITE_API_PROXY_TARGET в frontend/.env)'
+      )
+    }
+    const detail = err.response.data?.detail
+    if (typeof detail === 'string') return detail
+    return `Ошибка сервера (${err.response.status})`
+  }
+  return err instanceof Error ? err.message : 'Неизвестная ошибка'
+}
+
+const welcomeMessage = (): ChatMessage => {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  return {
+    id: 'welcome',
+    role: 'ai',
+    agentLabel: 'ATHLETE CORE',
+    timestamp: ts,
+    content:
+      'Опиши матч или тренировку — Analyst подключит память только когда это нужно (не для погоды или переноса одного события в календаре).',
+  }
+}
+
+export const useChat = () => {
+  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage()])
+  const [isSending, setIsSending] = useState(false)
+  const [threadId, setThreadId] = useState<string | null>(() => sessionStorage.getItem(THREAD_KEY))
+  const [needsMemory, setNeedsMemory] = useState<boolean | null>(null)
+  const [lastAgents, setLastAgents] = useState<string[]>([])
+  const [analysisRows, setAnalysisRows] = useState<AnalysisErrorRow[]>([])
+
+  const showVoiceDraft = useCallback((text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const now = new Date()
+    const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+    const draft: ChatMessage = {
+      id: VOICE_DRAFT_ID,
+      role: 'user',
+      agentLabel: 'ГОЛОС · черновик',
+      timestamp: ts,
+      content: trimmed,
+      draft: true,
+    }
+    setMessages((prev) => [...prev.filter((m) => m.id !== VOICE_DRAFT_ID), draft])
+  }, [])
+
+  const clearVoiceDraft = useCallback(() => {
+    setMessages((prev) => prev.filter((m) => m.id !== VOICE_DRAFT_ID))
+  }, [])
+
+  const send = useCallback(async (text: string) => {
+    if (!text.trim() || isSending) return
+    const now = new Date()
+    const hh = String(now.getHours()).padStart(2, '0')
+    const mm = String(now.getMinutes()).padStart(2, '0')
+    const ts = `${hh}:${mm}`
+
+    setMessages((prev) => prev.filter((m) => m.id !== VOICE_DRAFT_ID))
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      agentLabel: 'YOU',
+      timestamp: ts,
+      content: text,
+    }
+    const processingId = crypto.randomUUID()
+    const processingMessage: ChatMessage = {
+      id: processingId,
+      role: 'ai',
+      agentLabel: 'ROUTING…',
+      timestamp: ts,
+      processing: true,
+    }
+
+    setMessages((prev) => [...prev, userMessage, processingMessage])
+    setIsSending(true)
+
+    try {
+      const response = await sendMessage(text, { threadId: threadId ?? undefined })
+      if (response.thread_id) {
+        setThreadId(response.thread_id)
+        sessionStorage.setItem(THREAD_KEY, response.thread_id)
+      }
+      setNeedsMemory(response.needs_memory)
+      setLastAgents(response.agents_used ?? [])
+      setAnalysisRows(mapAnalysisToRows(response.analysis))
+
+      const label = agentLabel(response.agents_used)
+      const analysis = mapAnalysisToMessage(response.analysis)
+      const visibleMessage = response.analysis
+        ? stripAnalysisJsonFromText(response.message)
+        : response.message
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === processingId
+            ? {
+                ...msg,
+                processing: false,
+                agentLabel: label,
+                content: visibleMessage,
+                analysis,
+              }
+            : msg,
+        ),
+      )
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === processingId
+            ? {
+                ...msg,
+                processing: false,
+                agentLabel: 'SYSTEM',
+                content: chatErrorMessage(err),
+              }
+            : msg,
+        ),
+      )
+      setNeedsMemory(null)
+    } finally {
+      setIsSending(false)
+    }
+  }, [isSending, threadId])
+
+  return useMemo(
+    () => ({
+      messages,
+      send,
+      showVoiceDraft,
+      clearVoiceDraft,
+      isSending,
+      threadId,
+      needsMemory,
+      lastAgents,
+      analysisRows,
+    }),
+    [messages, send, showVoiceDraft, clearVoiceDraft, isSending, threadId, needsMemory, lastAgents, analysisRows],
+  )
+}

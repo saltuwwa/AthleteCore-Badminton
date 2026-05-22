@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "athletecore": {
+      "command": "${workspaceFolder}/venv/Scripts/python.exe",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/backend"
+      }
+    }
+  }
+}
