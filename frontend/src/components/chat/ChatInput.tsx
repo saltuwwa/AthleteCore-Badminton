@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiClient } from '../../api/client'
+import { uploadDocument, type DetectedDocType } from '../../api/documents'
 import { useVoiceRecorder } from '../../hooks/useVoiceRecorder'
+import { DocumentCard } from './DocumentCard'
 import { MicIcon } from '../ui/MicIcon'
 
 const suggestions = [
@@ -9,24 +11,35 @@ const suggestions = [
   'Сравни с матчем 15 апр',
 ]
 
+type PendingDoc = {
+  documentId: string
+  filename: string
+  detectedType: DetectedDocType
+}
+
 type Props = {
   onSend: (text: string) => void
   onVoiceTranscript?: (text: string) => void
+  onDocumentResult?: (message: string, notice?: string | null) => void
   isSending?: boolean
   needsMemory?: boolean | null
-  /** false = только транскрипт в поле и чат-черновик, без авто-отправки */
   autoSendAfterVoice?: boolean
 }
 
 export const ChatInput = ({
   onSend,
   onVoiceTranscript,
+  onDocumentResult,
   isSending = false,
   needsMemory = null,
   autoSendAfterVoice = false,
 }: Props) => {
   const [text, setText] = useState('')
   const [backendOk, setBackendOk] = useState<boolean | null>(null)
+  const [pendingDoc, setPendingDoc] = useState<PendingDoc | null>(null)
+  const [docBusy, setDocBusy] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
   const voice = useVoiceRecorder()
 
   useEffect(() => {
@@ -60,23 +73,38 @@ export const ChatInput = ({
       if (transcript) {
         setText(transcript)
         onVoiceTranscript?.(transcript)
-        if (autoSendAfterVoice) {
-          onSend(transcript)
-        }
+        if (autoSendAfterVoice) onSend(transcript)
       }
       return
     }
     await voice.toggleRecording()
   }
 
+  const onFilePicked = async (file: File) => {
+    setUploadError(null)
+    setDocBusy(true)
+    try {
+      const res = await uploadDocument(file)
+      setPendingDoc({
+        documentId: res.document_id,
+        filename: res.filename,
+        detectedType: res.detected_type,
+      })
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : 'Не удалось загрузить файл')
+    } finally {
+      setDocBusy(false)
+    }
+  }
+
   const memoryLabel = needsMemory === null ? '—' : needsMemory ? 'LTM ON' : 'LTM OFF'
   const micBusy = voice.isRecording || voice.isTranscribing
-  const busy = isSending || micBusy
+  const busy = isSending || micBusy || docBusy
 
   return (
     <div className="crosshair-corner relative rounded-2xl border border-[var(--border-strong)] bg-[var(--surface-glass)] p-4 backdrop-blur-md">
       <div className="flex items-center justify-between gap-3">
-        <p className="label-mono">Ask Analyst · LangGraph + Whisper</p>
+        <p className="label-mono">Ask Analyst · Chat</p>
         <div className="flex items-center gap-3">
           <span
             className="label-mono rounded-full border border-[var(--border)] px-2 py-0.5 text-[9px]"
@@ -91,39 +119,31 @@ export const ChatInput = ({
               backendOk === false ? 'bg-[var(--accent3)]' : 'bg-[var(--accent2)]'
             }`}
           />
-          <span
-            className={`label-mono ${
-              backendOk === false ? 'text-[var(--accent3)]' : 'text-[var(--accent2)]'
-            }`}
-          >
-            {voice.isTranscribing
-              ? 'WHISPER'
-              : isSending
-                ? 'SENDING'
-                : backendOk === false
-                  ? 'OFFLINE'
-                  : backendOk === null
-                    ? '…'
-                    : 'CONNECTED'}
-          </span>
         </div>
       </div>
+
+      {pendingDoc ? (
+        <div className="mt-3">
+          <DocumentCard
+            documentId={pendingDoc.documentId}
+            filename={pendingDoc.filename}
+            detectedType={pendingDoc.detectedType}
+            onBusyChange={setDocBusy}
+            onRemove={() => setPendingDoc(null)}
+            onResult={(msg, notice) => {
+              onDocumentResult?.(notice ? `${notice}\n\n${msg}` : msg)
+            }}
+          />
+        </div>
+      ) : null}
+
+      {uploadError ? <p className="mt-2 text-[11px] text-[var(--accent3)]">{uploadError}</p> : null}
 
       {voice.isRecording ? (
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-[rgba(255,107,138,0.25)] bg-[rgba(255,107,138,0.08)] px-3 py-2">
           <span className="h-2 w-2 rounded-full bg-[var(--accent3)] pulse-dot" />
-          <span className="font-mono-ui text-[11px] text-[var(--accent3)]">
-            REC {Math.floor(voice.seconds / 60)}:{String(voice.seconds % 60).padStart(2, '0')} · нажми микрофон, чтобы остановить
-          </span>
+          <span className="font-mono-ui text-[11px] text-[var(--accent3)]">Запись…</span>
         </div>
-      ) : null}
-
-      {voice.transcriptNote && !voice.isRecording ? (
-        <p className="label-mono mt-2 text-[var(--accent2)]">{voice.transcriptNote}</p>
-      ) : null}
-
-      {voice.error ? (
-        <p className="mt-2 text-[11px] text-[var(--accent3)]">{voice.error}</p>
       ) : null}
 
       <textarea
@@ -137,8 +157,20 @@ export const ChatInput = ({
         }}
         rows={2}
         disabled={busy}
-        placeholder="Запиши голос или введи текст — после записи проверь черновик в чате и нажми «Отправить»"
+        placeholder="Матч, тренировка или турнирный файл…"
         className="font-display mt-3 w-full resize-none bg-transparent text-[14px] leading-relaxed text-[var(--text-primary)] outline-none placeholder:text-[var(--muted)] disabled:opacity-50"
+      />
+
+      <input
+        ref={fileRef}
+        type="file"
+        className="hidden"
+        accept=".pdf,.docx,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.webp"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void onFilePicked(f)
+          e.target.value = ''
+        }}
       />
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -148,7 +180,7 @@ export const ChatInput = ({
             type="button"
             disabled={busy}
             onClick={() => setText(s)}
-            className="rounded-full border border-[var(--border)] bg-[var(--bg3)] px-3 py-1 text-[11px] text-[var(--muted2)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent-strong)] disabled:opacity-40"
+            className="rounded-full border border-[var(--border)] bg-[var(--bg3)] px-3 py-1 text-[11px] text-[var(--muted2)] hover:border-[var(--accent)] disabled:opacity-40"
           >
             {s}
           </button>
@@ -157,31 +189,32 @@ export const ChatInput = ({
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
-            disabled={isSending || voice.isTranscribing}
-            onClick={handleMic}
-            className={`relative flex h-9 w-9 items-center justify-center rounded-full border ${
-              voice.isRecording
-                ? 'border-[var(--accent3)] bg-[rgba(255,107,138,0.12)] text-[var(--accent3)]'
-                : 'border-[var(--border)] bg-[var(--bg3)] text-[var(--text-soft)]'
-            }`}
-            title={voice.isRecording ? 'Остановить и транскрибировать' : 'Записать голосовой лог'}
-            aria-label={voice.isRecording ? 'Остановить запись' : 'Записать голосовой лог'}
+            disabled={busy}
+            onClick={() => fileRef.current?.click()}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg3)] text-[14px] disabled:opacity-40"
+            title="Прикрепить документ"
+            aria-label="Прикрепить документ"
           >
-            {voice.isRecording ? <span className="pulse-ring" style={{ color: 'var(--accent3)' }} /> : null}
-            <MicIcon size={17} className="relative z-[1]" />
+            📎
           </button>
           <button
             type="button"
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg3)] text-[14px]"
-            aria-label="Прикрепить"
+            disabled={isSending || voice.isTranscribing}
+            onClick={handleMic}
+            className={`flex h-9 w-9 items-center justify-center rounded-full border ${
+              voice.isRecording
+                ? 'border-[var(--accent3)] bg-[rgba(255,107,138,0.12)] text-[var(--accent3)]'
+                : 'border-[var(--border)] bg-[var(--bg3)]'
+            }`}
+            aria-label="Голос"
           >
-            <span aria-hidden>📎</span>
+            <MicIcon size={17} />
           </button>
           <button
             type="button"
             disabled={busy || !text.trim()}
             onClick={submit}
-            className="glow-breathe rounded-full bg-[var(--accent)] px-5 py-2 font-display text-[12px] font-semibold tracking-wide text-white disabled:opacity-40"
+            className="rounded-full bg-[var(--accent)] px-5 py-2 font-display text-[12px] font-semibold text-white disabled:opacity-40"
           >
             {isSending ? '…' : 'Отправить →'}
           </button>

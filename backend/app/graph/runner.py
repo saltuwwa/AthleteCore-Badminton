@@ -42,6 +42,21 @@ async def run_chat_graph(
     tid = thread_id or str(uuid.uuid4())
     graph = await get_compiled_graph()
 
+    config = {
+        "configurable": {
+            "thread_id": tid,
+            "db_session": db,
+        }
+    }
+
+    prior_offer: str | None = None
+    try:
+        snap = await graph.aget_state(config)
+        if snap and snap.values:
+            prior_offer = snap.values.get("offer_followup")
+    except Exception:
+        prior_offer = None
+
     initial: AthleteGraphState = {
         "thread_id": tid,
         "user_id": user_id,
@@ -50,13 +65,7 @@ async def run_chat_graph(
         "agent_outputs": [],
         "agents_used": [],
         "requires_human_confirmation": False,
-    }
-
-    config = {
-        "configurable": {
-            "thread_id": tid,
-            "db_session": db,
-        }
+        "offer_followup": prior_offer,
     }
 
     result = await graph.ainvoke(initial, config)
@@ -74,6 +83,9 @@ async def run_chat_graph(
         final = strip_analysis_json_from_text(final)
 
     needs_memory = bool(result.get("needs_memory"))
+    interaction_mode = result.get("interaction_mode") or "neutral"
+    offer_followup = result.get("offer_followup")
+
     if needs_memory:
         await _persist_turn_memories(
             db,
@@ -83,6 +95,14 @@ async def run_chat_graph(
             assistant_message=final,
         )
 
+    await _persist_interaction_offer(
+        db,
+        user_id=user_id,
+        session_id=session_id,
+        offer=offer_followup,
+        interaction_mode=interaction_mode,
+    )
+
     return {
         "message": final,
         "thread_id": tid,
@@ -90,6 +110,7 @@ async def run_chat_graph(
         "requires_confirmation": bool(result.get("requires_human_confirmation")),
         "analysis": analysis,
         "needs_memory": needs_memory,
+        "interaction_mode": interaction_mode,
         "memory_citations_count": len(result.get("memory_citations") or []),
     }
 
@@ -143,6 +164,66 @@ async def _persist_turn_memories(
             source_turn_id=turn.id,
             candidates=candidates,
             embeddings=embeddings,
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+
+async def _persist_interaction_offer(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    session_id: str,
+    offer: str | None,
+    interaction_mode: str,
+) -> None:
+    """Store pending analysis consent (HITL) or clear after full debrief."""
+    if not settings.openai_api_key:
+        return
+    from app.memory.mapping import normalize_candidate
+
+    if interaction_mode == "full_analysis":
+        value = "none — debrief completed"
+    elif offer:
+        value = f"{offer} — awaiting athlete yes/no"
+    else:
+        return
+
+    try:
+        client = openai_client(settings)
+        candidate = normalize_candidate(
+            {
+                "type": "preference",
+                "key": "interaction.pending_offer",
+                "value": value,
+                "confidence": 0.95,
+                "supersedes_same_key": True,
+                "importance": 0.85,
+            }
+        )
+        emb = await embed_texts(
+            client,
+            settings.embedding_model,
+            [f"{candidate['key']}: {candidate['value']}"],
+            dimensions=settings.embedding_dimensions,
+        )
+        turn_stub = Turn(
+            session_id=session_id,
+            user_id=user_id,
+            messages=[],
+            turn_timestamp=datetime.now(UTC),
+            metadata_={"source": "interaction_offer"},
+        )
+        db.add(turn_stub)
+        await db.flush()
+        await apply_supersession_and_insert(
+            db,
+            user_id=user_id,
+            source_session=session_id,
+            source_turn_id=turn_stub.id,
+            candidates=[candidate],
+            embeddings=emb,
         )
         await db.commit()
     except Exception:

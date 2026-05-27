@@ -66,6 +66,23 @@ export const useChat = () => {
     setMessages((prev) => prev.filter((m) => m.id !== VOICE_DRAFT_ID))
   }, [])
 
+  const addAiMessage = useCallback((content: string) => {
+    const trimmed = content.trim()
+    if (!trimmed) return
+    const now = new Date()
+    const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        role: 'ai',
+        agentLabel: 'ТУРНИР · документ',
+        timestamp: ts,
+        content: trimmed,
+      },
+    ])
+  }, [])
+
   const send = useCallback(async (text: string) => {
     if (!text.trim() || isSending) return
     const now = new Date()
@@ -153,7 +170,19 @@ export const useChat = () => {
       needsMemory,
       lastAgents,
       analysisRows,
+      addAiMessage,
     }),
-    [messages, send, showVoiceDraft, clearVoiceDraft, isSending, threadId, needsMemory, lastAgents, analysisRows],
+    [
+      messages,
+      send,
+      showVoiceDraft,
+      clearVoiceDraft,
+      isSending,
+      threadId,
+      needsMemory,
+      lastAgents,
+      analysisRows,
+      addAiMessage,
+    ],
   )
 }

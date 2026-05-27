@@ -39,6 +39,9 @@ Thumbs.db
 # Large sources & generated parse output (keep locally)
 book sources/
 output/
+qdrant_data/
+backend/data/videos/
+backend/data/documents/
 
 # Temp / backup
 _course_tz_extract.txt

@@ -38,6 +38,8 @@ from app.schemas import (
 )
 from app.schedule.service import ScheduleService
 from app.transcription import transcribe_audio_bytes
+from app.document_analysis import router as document_analysis_router
+from video_analysis.routes import router as video_analysis_router
 
 memory_service = MemoryContextService()
 write_gate = MemoryWriteGate()
@@ -89,6 +91,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(video_analysis_router)
+app.include_router(document_analysis_router)
+
 
 @app.get("/")
 async def root() -> dict[str, str]:
@@ -96,10 +101,26 @@ async def root() -> dict[str, str]:
 
 
 @app.get("/health")
-async def health() -> dict[str, str | bool]:
+async def health() -> dict[str, str | bool | int]:
+    rag_mode = "lexical"
+    rag_points = 0
+    if settings.methodology_use_qdrant:
+        try:
+            from app.rag.retrieve import qdrant_available
+            from app.rag.qdrant_store import collection_point_count, make_client
+
+            if qdrant_available():
+                rag_mode = "qdrant"
+                rag_points = collection_point_count(
+                    make_client(settings), settings.qdrant_collection_methodology
+                )
+        except Exception:
+            rag_mode = "lexical"
     return {
         "status": "ok",
         "whisper_configured": bool(settings.openai_api_key),
+        "methodology_rag": rag_mode,
+        "methodology_vectors": rag_points,
     }
 
 

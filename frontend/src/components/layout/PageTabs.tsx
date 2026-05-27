@@ -2,7 +2,7 @@ import { motion } from 'framer-motion'
 import { NavLink } from 'react-router-dom'
 
 const tabs = [
-  { to: '/overview', label: 'Обзор' },
+  { to: '/home', label: 'Главная' },
   { to: '/chat', label: 'Чат' },
   { to: '/analysis', label: 'Анализ' },
   { to: '/schedule', label: 'Расписание' },

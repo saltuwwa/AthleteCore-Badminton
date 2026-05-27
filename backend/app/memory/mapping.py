@@ -23,6 +23,8 @@ EPISODIC_KEY_PREFIXES = (
     "performance.",
     "training.session.",
     "schedule.confirmation.",
+    "video.analysis.",
+    "competition.document.",
 )
 
 
@@ -46,6 +48,10 @@ def infer_event_type(key: str, mem_type: str) -> str | None:
         return "match_log"
     if k.startswith("schedule.confirmation") or k.startswith("hitl."):
         return "schedule_confirmation"
+    if k.startswith("video.analysis."):
+        return "video_analysis"
+    if k.startswith("competition.document."):
+        return "competition_document_analysis"
     if k.startswith("training.") or k.startswith("performance."):
         return "training_log"
     return "training_log" if mem_type == ExtractedMemoryType.event.value else None

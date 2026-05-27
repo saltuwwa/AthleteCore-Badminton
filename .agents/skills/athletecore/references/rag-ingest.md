@@ -1,23 +1,29 @@
 # RAG ingest (methodology books)
 
-## Current pipeline
+## Pipeline
 
 1. Place PDF in `book sources/`
 2. Run `scripts/parse_badminton_pdf.py` → `output/<name>.md`
-3. MCP `search_sports_methodology` indexes `output/*.md` automatically (in-memory chunks)
+3. `docker compose up -d qdrant`
+4. Run `scripts/ingest_methodology_qdrant.py --recreate`
+5. Analyst / MCP `search_sports_methodology` → Qdrant (fallback: lexical)
+
+## Chunking (ingest)
+
+- Split on `<!-- page N -->` from LlamaParse
+- Sub-chunks: ~900 tokens, overlap 120 (`METHODOLOGY_CHUNK_TOKENS`)
+- Strip fliphtml5 junk lines before embed
+
+## Embeddings & store
+
+- Model: `text-embedding-3-small` (1536d)
+- Collection: `sports_methodology` @ `QDRANT_URL`
 
 ## Large PDFs (>50 MB)
 
-- Use `--max-pages` or `--target-pages "1-40"` + `--append`
-- Prefer `--multimodal-model gemini-2.0-flash` + `GOOGLE_API_KEY` if OpenAI multimodal fails
+- `--target-pages "31-40" --append` (10-page batches)
+- Pages 31+: often `--no-multimodal`; multimodal may use `openai-gpt-4o-mini`
 
-## Future (TZ)
+## Health check
 
-- Chunk 512 / overlap 64
-- Qdrant collection `sports_methodology`
-- Analyst node dual retrieval: LTM + methodology
-
-## Files on disk
-
-- `output/Badminton-Footwork-Pocket-eBook_compressed-V2.md` — full
-- `output/Badminton handbook Pages.md` — partial batches OK
+`GET /health` → `methodology_rag: qdrant`, `methodology_vectors` > 0

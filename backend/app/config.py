@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     recall_stable_min_cos: float = 0.2
     recall_ranked_min_cos: float = 0.2
 
+    qdrant_url: str = "http://127.0.0.1:6333"
+    qdrant_timeout_sec: int = 30
+    qdrant_collection_methodology: str = "sports_methodology"
+    methodology_use_qdrant: bool = True
+    methodology_fallback_lexical: bool = True
+    methodology_min_score: float = 0.25
+    methodology_chunk_tokens: int = 900
+    methodology_chunk_overlap_tokens: int = 120
+
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     @field_validator("disable_reranker", mode="before")

@@ -1,0 +1,9 @@
+# Qdrant for AthleteCore methodology RAG (optional; backend falls back to lexical if down).
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    restart: unless-stopped

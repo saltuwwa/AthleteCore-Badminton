@@ -1,7 +1,8 @@
 """
 Search parsed badminton methodology Markdown (output/*.md) for Analyst / MCP.
 
-Uses chunking + lexical scoring (no extra API). Optional embedding boost later.
+Primary: Qdrant vector RAG (text-embedding-3-small).
+Fallback: lexical scoring when Qdrant is down or empty.
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from app.config import settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -58,17 +61,12 @@ def _load_chunks() -> list[MethodologyChunk]:
     return _CHUNK_CACHE
 
 
-def search_sports_methodology(
+def _search_lexical(
     query: str,
     *,
     top_k: int = 5,
     sources: list[str] | None = None,
 ) -> list[dict]:
-    """
-    Return ranked snippets from sports methodology books for RAG-style grounding.
-
-    Each item: source, page, score, snippet (max ~600 chars).
-    """
     query = (query or "").strip()
     if not query:
         return []
@@ -114,15 +112,46 @@ def search_sports_methodology(
                 "page": ch.page_hint,
                 "score": round(score, 3),
                 "snippet": snippet,
+                "retrieval": "lexical",
             }
         )
     return results
 
 
+def search_sports_methodology(
+    query: str,
+    *,
+    top_k: int = 5,
+    sources: list[str] | None = None,
+) -> list[dict]:
+    """
+    Return ranked snippets from sports methodology books for RAG-style grounding.
+
+    Each item: source, page, score, snippet, retrieval (qdrant|lexical).
+    """
+    if settings.methodology_use_qdrant:
+        try:
+            from app.rag.retrieve import qdrant_available, search_methodology_rag
+
+            if qdrant_available():
+                hits = search_methodology_rag(
+                    query, top_k=top_k, sources=sources
+                )
+                if hits:
+                    return hits
+        except Exception:
+            pass
+
+    if settings.methodology_fallback_lexical:
+        return _search_lexical(query, top_k=top_k, sources=sources)
+    return []
+
+
 def format_methodology_context(hits: list[dict]) -> str:
     if not hits:
         return ""
-    lines = ["## Sports methodology (from parsed books)"]
+    mode = hits[0].get("retrieval", "unknown")
+    lines = [f"## Sports methodology (from parsed books, {mode})"]
     for i, h in enumerate(hits, 1):
         page = f", p.{h['page']}" if h.get("page") else ""
         lines.append(

@@ -88,13 +88,22 @@ Memory нужна не для "красивого чата", а для:
 - `source_event_id`
 - `updated_at`
 
+**Video-derived semantic (после 3+ разборов, confidence ≥ 0.72):**
+- `performance.video.repeated_error_pattern`
+- `performance.video.improvement_pattern`
+- `performance.video.athlete_baseline`
+
 ### 4.3 LTM Episodic
 - `user_id`
 - `event_id`
-- `event_type` (`match_log`, `training_log`, `health_note`, `schedule_confirmation`)
+- `event_type` (`match_log`, `training_log`, `health_note`, `schedule_confirmation`, **`video_analysis`**)
 - `timestamp`
 - `payload` (структурно: ошибки, риск, рекомендации)
 - `importance`
+
+**`video_analysis` (pose MVP):** только JSON разбора, не сырое видео. Payload: `match_type`, `target_track_ids`, `movement_metrics`, `speed_by_minute`, `speed_drop_percent`, `attack_defense_ratio`, `possible_fatigue_minute`, `recovery_issues`, `key_moments_timeline`, `detected_issues`, `recommendations`, `source_video_id`. Ключ: `video.analysis.{source_video_id}`.
+
+**`competition_document_analysis`:** турнирные PDF/DOCX/XLSX/CSV/таблицы из чата. Только структура: `tournament_name`, `date`, `match_list`, `scores`, `rounds`, `player_results`, `insights`, `recommendations`. Сырой текст документа в LTM не пишется. Ключ: `competition.document.{document_id}`. Guardrails: `app/security/untrusted_content.py`.
 
 ### 4.4 LTM Procedural
 - `user_id`

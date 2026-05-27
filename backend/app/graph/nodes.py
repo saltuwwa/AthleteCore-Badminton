@@ -15,9 +15,19 @@ from .llm import (
     parse_planner_json,
     resolve_analyst_model,
 )
+from .interaction import (
+    offer_followup_for_mode,
+    resolve_coaching_tone,
+    resolve_interaction_mode,
+    support_instructions_block,
+)
 from .prompts import (
     AGGREGATOR_SYSTEM,
+    ANALYST_CELEBRATE_SYSTEM,
+    ANALYST_DIRECT_SYSTEM,
+    ANALYST_SUPPORT_SYSTEM,
     ANALYST_SYSTEM,
+    ANALYST_TOUGH_SYSTEM,
     DIRECT_SYSTEM,
     HEALTH_COACH_SYSTEM,
     PLANNER_SYSTEM,
@@ -91,12 +101,22 @@ async def planner_node(state: AthleteGraphState, config: RunnableConfig) -> dict
             routed = name  # type: ignore[assignment]
             break
 
+    interaction_mode = resolve_interaction_mode(
+        user_input,
+        prior_offer=state.get("offer_followup"),
+        planner_mode=decision.get("interaction_mode"),
+    )
+    coaching_tone = "gentle"
     needs_memory = resolve_needs_memory(user_input, routed, decision)
+    if interaction_mode in ("support_first", "celebrate_first", "full_analysis"):
+        needs_memory = True
 
     return {
         "planner_decision": decision,
         "routed_agent": routed,
         "needs_memory": needs_memory,
+        "interaction_mode": interaction_mode,
+        "coaching_tone": coaching_tone,
         "memory_context": "",
         "memory_citations": [],
         "requires_human_confirmation": bool(decision.get("needs_confirmation")),
@@ -114,25 +134,56 @@ def route_after_memory(state: AthleteGraphState) -> str:
     return state.get("routed_agent") or "analyst"
 
 
+def _analyst_system_prompt(mode: str, coaching_tone: str = "gentle") -> str:
+    if mode == "support_first":
+        return ANALYST_SUPPORT_SYSTEM
+    if mode == "celebrate_first":
+        return ANALYST_CELEBRATE_SYSTEM
+    if mode in ("full_analysis", "neutral"):
+        if coaching_tone == "tough":
+            return ANALYST_TOUGH_SYSTEM
+        if coaching_tone == "direct":
+            return ANALYST_DIRECT_SYSTEM
+        return ANALYST_SYSTEM
+    return ANALYST_SYSTEM
+
+
 async def analyst_node(state: AthleteGraphState, config: RunnableConfig) -> dict[str, Any]:
     user_input = state.get("user_input", "")
-    model = resolve_analyst_model(settings)
-    enriched = await build_analyst_context(
-        user_input, state.get("memory_context") or ""
+    mode = state.get("interaction_mode") or "neutral"
+    memory_context = state.get("memory_context") or ""
+    coaching_tone = resolve_coaching_tone(
+        user_input, memory_context, mode  # type: ignore[arg-type]
     )
+    model = resolve_analyst_model(settings)
+    enriched = await build_analyst_context(user_input, memory_context)
+    support_block = support_instructions_block(memory_context, mode)  # type: ignore[arg-type]
+    user_blob = _user_prompt(user_input, enriched)
+    if support_block:
+        user_blob = f"{support_block}\n\n{user_blob}"
+
+    if mode in ("support_first", "celebrate_first"):
+        temp = 0.35
+    elif coaching_tone in ("direct", "tough"):
+        temp = 0.15
+    else:
+        temp = 0.2
 
     content = await acompletion(
         model=model,
         messages=[
-            {"role": "system", "content": ANALYST_SYSTEM},
             {
-                "role": "user",
-                "content": _user_prompt(user_input, enriched),
+                "role": "system",
+                "content": _analyst_system_prompt(mode, coaching_tone),
             },
+            {"role": "user", "content": user_blob},
         ],
-        temperature=0.2,
+        temperature=temp,
     )
-    analysis = extract_analysis_json(content)
+    analysis = None
+    if mode in ("full_analysis", "neutral"):
+        analysis = extract_analysis_json(content)
+    offer = offer_followup_for_mode(mode)  # type: ignore[arg-type]
     return {
         "agent_outputs": [
             {
@@ -142,27 +193,30 @@ async def analyst_node(state: AthleteGraphState, config: RunnableConfig) -> dict
             }
         ],
         "agents_used": ["analyst"],
+        "offer_followup": offer,
     }
 
 
 async def health_coach_node(state: AthleteGraphState, config: RunnableConfig) -> dict[str, Any]:
+    mode = state.get("interaction_mode") or "neutral"
+    memory_context = state.get("memory_context") or ""
+    support_block = support_instructions_block(memory_context, mode)  # type: ignore[arg-type]
+    user_blob = _user_prompt(state.get("user_input", ""), memory_context)
+    if support_block:
+        user_blob = f"{support_block}\n\n{user_blob}"
     content = await acompletion(
         model=resolve_analyst_model(settings),
         messages=[
             {"role": "system", "content": HEALTH_COACH_SYSTEM},
-            {
-                "role": "user",
-                "content": _user_prompt(
-                    state.get("user_input", ""),
-                    state.get("memory_context") or "",
-                ),
-            },
+            {"role": "user", "content": user_blob},
         ],
         temperature=0.4,
     )
+    offer = offer_followup_for_mode(mode) if mode in ("support_first", "celebrate_first") else None  # type: ignore[arg-type]
     return {
         "agent_outputs": [{"agent": "health_coach", "content": content}],
         "agents_used": ["health_coach"],
+        "offer_followup": offer,
     }
 
 
@@ -257,10 +311,16 @@ async def aggregator_node(state: AthleteGraphState, config: RunnableConfig) -> d
         return {"final_response": "Не удалось получить ответ агента."}
 
     if len(outputs) == 1 and not settings.openai_api_key:
-        return {"final_response": outputs[0].get("content", "")}
+        out = {"final_response": outputs[0].get("content", "")}
+        if state.get("offer_followup"):
+            out["offer_followup"] = state.get("offer_followup")
+        return out
 
     if len(outputs) == 1:
-        return {"final_response": outputs[0].get("content", "")}
+        out = {"final_response": outputs[0].get("content", "")}
+        if state.get("offer_followup"):
+            out["offer_followup"] = state.get("offer_followup")
+        return out
 
     merged_blob = "\n\n".join(
         f"[{o.get('agent', 'agent')}]\n{o.get('content', '')}" for o in outputs
@@ -276,4 +336,7 @@ async def aggregator_node(state: AthleteGraphState, config: RunnableConfig) -> d
         )
     except Exception:
         final = outputs[0].get("content", "")
-    return {"final_response": final}
+    out: dict[str, Any] = {"final_response": final}
+    if state.get("offer_followup"):
+        out["offer_followup"] = state.get("offer_followup")
+    return out

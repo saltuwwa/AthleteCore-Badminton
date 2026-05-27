@@ -5,7 +5,7 @@ import { PageTabs } from '../components/layout/PageTabs'
 import { useChat } from '../hooks/useChat'
 
 export const ChatPage = () => {
-  const { messages, send, showVoiceDraft, isSending, needsMemory } = useChat()
+  const { messages, send, showVoiceDraft, isSending, needsMemory, addAiMessage } = useChat()
 
   return (
     <motion.div
@@ -39,6 +39,7 @@ export const ChatPage = () => {
           <ChatInput
             onSend={send}
             onVoiceTranscript={showVoiceDraft}
+            onDocumentResult={addAiMessage}
             isSending={isSending}
             needsMemory={needsMemory}
             autoSendAfterVoice={false}

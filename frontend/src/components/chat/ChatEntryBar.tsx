@@ -11,7 +11,7 @@ const PlusIcon = () => (
   </svg>
 )
 
-/** ChatGPT-style entry bar on Overview — click opens /chat */
+/** ChatGPT-style entry bar on Home — click opens /chat */
 export const ChatEntryBar = () => {
   return (
     <div className="shrink-0 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--bg-deep)_85%,transparent)] px-8 py-5 backdrop-blur-md">

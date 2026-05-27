@@ -24,5 +24,8 @@ class AthleteGraphState(TypedDict, total=False):
     agent_outputs: Annotated[list[dict[str, Any]], operator.add]
 
     requires_human_confirmation: bool
+    interaction_mode: str
+    coaching_tone: str
+    offer_followup: str | None
     final_response: str
     agents_used: list[str]

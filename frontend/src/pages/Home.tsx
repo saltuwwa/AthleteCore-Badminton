@@ -13,7 +13,7 @@ const item = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.22, 1, 0.36, 1] as const } },
 }
 
-export const Overview = () => {
+export const Home = () => {
   return (
     <motion.div
       variants={container}
@@ -92,10 +92,10 @@ export const Overview = () => {
                 Открыть расписание
               </Link>
               <Link
-                to="/analysis"
+                to="/analysis/video"
                 className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-[12px] hover:border-[var(--accent)]"
               >
-                Анализ матча
+                Разбор видео
               </Link>
               <Link
                 to="/health"

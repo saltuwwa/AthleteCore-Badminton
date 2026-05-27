@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -140,12 +141,22 @@ def _normalize_job_results(raw) -> list:
     return [raw]
 
 
-def job_results_to_markdown(job_results: list) -> str:
+def max_page_in_markdown(path: Path) -> int:
+    """Highest <!-- page N --> in an existing output file (for --append)."""
+    if not path.is_file():
+        return 0
+    nums = [
+        int(m.group(1))
+        for m in re.finditer(r"<!-- page (\d+) -->", path.read_text(encoding="utf-8"))
+    ]
+    return max(nums) if nums else 0
+
+
+def job_results_to_markdown(job_results: list, *, page_offset: int = 0) -> str:
     if not job_results:
         raise RuntimeError("LlamaParse returned no job results.")
 
     parts: list[str] = []
-    page_offset = 0
 
     for job_index, job in enumerate(job_results, start=1):
         if getattr(job, "error", None) or getattr(job, "status", None) in (
@@ -189,9 +200,9 @@ def job_results_to_markdown(job_results: list) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def parse_pdf(pdf_path: Path, parser: LlamaParse) -> str:
+def parse_pdf(pdf_path: Path, parser: LlamaParse, *, page_offset: int = 0) -> str:
     raw = parser.parse(str(pdf_path))
-    return job_results_to_markdown(_normalize_job_results(raw))
+    return job_results_to_markdown(_normalize_job_results(raw), page_offset=page_offset)
 
 
 def save_markdown(
@@ -318,14 +329,20 @@ def main(argv: list[str] | None = None) -> int:
             multimodal_model=args.multimodal_model,
             use_multimodal=not args.no_multimodal,
         )
-        markdown = parse_pdf(pdf_path, llama_parser)
+        out_path = args.output_dir.resolve() / f"{pdf_path.stem}.md"
+        page_offset = max_page_in_markdown(out_path) if args.append else 0
+        if page_offset:
+            print(f"Append page offset: continuing from page {page_offset + 1}")
+
+        markdown = parse_pdf(pdf_path, llama_parser, page_offset=page_offset)
         out_path = save_markdown(
             markdown,
             pdf_path,
             args.output_dir.resolve(),
             append=args.append,
         )
-        print(f"Saved: {out_path} ({len(markdown):,} characters)")
+        final_max = max_page_in_markdown(out_path)
+        print(f"Saved: {out_path} ({len(markdown):,} characters, pages 1–{final_max})")
         return 0
 
     except (EnvironmentError, FileNotFoundError, ValueError) as exc:

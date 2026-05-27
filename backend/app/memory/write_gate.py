@@ -21,9 +21,11 @@ class MemoryWriteGate:
         "recovery.",
         "constraint.",
         "performance.error",
+        "performance.video.",
         "schedule.confirmation",
         "hitl.",
         "agent.",
+        "interaction.",
     )
 
     def should_write(
@@ -53,7 +55,13 @@ class MemoryWriteGate:
         if any(frag in key for frag in self.IMPORTANT_KEY_FRAGMENTS):
             return WriteDecision(True, f"important-key:{key}")
 
-        if event_type in {"match_log", "training_log", "schedule_confirmation"}:
+        if event_type in {
+            "match_log",
+            "training_log",
+            "schedule_confirmation",
+            "video_analysis",
+            "competition_document_analysis",
+        }:
             return WriteDecision(True, "core-event")
 
         if memory_type == "event":

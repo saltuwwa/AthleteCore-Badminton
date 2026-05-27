@@ -4,7 +4,7 @@ import { NavLink } from 'react-router-dom'
 type NavItem = { to: string; label: string; index: string }
 
 const navItems: NavItem[] = [
-  { to: '/overview', label: 'Обзор', index: '01' },
+  { to: '/home', label: 'Главная', index: '01' },
   { to: '/chat', label: 'Чат', index: '02' },
   { to: '/analysis', label: 'Анализ', index: '03' },
   { to: '/schedule', label: 'Расписание', index: '04' },

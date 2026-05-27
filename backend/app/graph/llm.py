@@ -61,19 +61,30 @@ def parse_planner_json(raw: str) -> dict[str, Any]:
 
 def heuristic_route(user_input: str) -> dict[str, Any]:
     """Fallback routing without LLM."""
+    from app.graph.interaction import (
+        detect_emotional_tone,
+        is_analysis_consent,
+        wants_explicit_debrief,
+    )
+
     t = user_input.lower()
-    if any(
-        w in t
-        for w in (
-            "расписан",
-            "календар",
-            "недельн",
-            "на неделю",
-            "schedule",
-            "план трен",
-        )
-    ):
-        return {"agents": ["scheduler"], "reason": "heuristic-schedule", "needs_confirmation": True}
+    tone = detect_emotional_tone(user_input)
+    if wants_explicit_debrief(user_input):
+        return {
+            "agents": ["analyst"],
+            "reason": "heuristic-explicit-debrief",
+            "needs_confirmation": False,
+            "interaction_mode": "full_analysis",
+            "needs_memory": True,
+        }
+    if is_analysis_consent(user_input) and len(t) < 80:
+        return {
+            "agents": ["analyst"],
+            "reason": "heuristic-consent-analysis",
+            "needs_confirmation": False,
+            "interaction_mode": "full_analysis",
+            "needs_memory": True,
+        }
     if any(
         w in t
         for w in (
@@ -86,8 +97,42 @@ def heuristic_route(user_input: str) -> dict[str, Any]:
             "recovery",
             "health",
         )
+    ) and not any(w in t for w in ("проигр", "ошиб", "матч", "поражен", "провал")):
+        return {
+            "agents": ["health_coach"],
+            "reason": "heuristic-health",
+            "needs_confirmation": False,
+            "interaction_mode": "neutral",
+            "needs_memory": True,
+        }
+    if tone == "distressed":
+        return {
+            "agents": ["analyst"],
+            "reason": "heuristic-distress-support",
+            "needs_confirmation": False,
+            "interaction_mode": "support_first",
+            "needs_memory": True,
+        }
+    if tone == "positive":
+        return {
+            "agents": ["analyst"],
+            "reason": "heuristic-celebrate",
+            "needs_confirmation": False,
+            "interaction_mode": "celebrate_first",
+            "needs_memory": True,
+        }
+    if any(
+        w in t
+        for w in (
+            "расписан",
+            "календар",
+            "недельн",
+            "на неделю",
+            "schedule",
+            "план трен",
+        )
     ):
-        return {"agents": ["health_coach"], "reason": "heuristic-health", "needs_confirmation": False}
+        return {"agents": ["scheduler"], "reason": "heuristic-schedule", "needs_confirmation": True}
     if any(
         w in t
         for w in (

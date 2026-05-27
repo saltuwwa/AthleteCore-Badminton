@@ -12,6 +12,7 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: {
         '/api': { target: apiTarget, changeOrigin: true },
+        '/video': { target: apiTarget, changeOrigin: true },
         '/health': { target: apiTarget, changeOrigin: true },
       },
     },

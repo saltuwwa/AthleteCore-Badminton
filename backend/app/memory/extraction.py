@@ -24,7 +24,7 @@ Return STRICT JSON:
       "supersedes_same_key": true or false,
       "risk_level": "low | med | high (optional)",
       "importance": 0.0-1.0,
-      "event_type": "match_log | training_log | schedule_confirmation (optional)",
+      "event_type": "match_log | training_log | schedule_confirmation | video_analysis (optional)",
       "is_repeated_pattern": true or false,
       "is_user_confirmed": true or false,
       "payload": {}
@@ -43,6 +43,9 @@ Key conventions (use consistently):
 - schedule.confirmation — user accepted/rejected AI schedule change
 - agent.response_style — how the athlete wants answers (procedural)
 - hitl.confirmation_strictness — how strict plan confirmation should be
+- interaction.support.style — gentle | direct | tough | motivational (procedural; direct/tough = blunt debrief when agreed)
+- interaction.support.when_low — how to support after loss / bad mood
+- interaction.support.when_high — how to respond after wins
 
 Rules:
 - Extract facts, preferences, opinions, match/training events, HITL decisions.
