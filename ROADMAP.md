@@ -92,4 +92,3 @@ When shipping features, update:
 
 - [README.md](README.md) Current Status
 - [ARCHITECTURE.md](ARCHITECTURE.md) diagrams
-- [CHECKLIST.md](CHECKLIST.md) evidence column
