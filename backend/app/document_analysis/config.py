@@ -14,7 +14,7 @@ class DocumentAnalysisSettings(BaseSettings):
     document_storage_dir: str = str(_BACKEND_DIR / "data" / "documents")
     max_document_mb: int = 25
     allowed_extensions: str = ".pdf,.docx,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.webp"
-    document_gemini_model: str = "gemini-2.0-flash"
+    document_gemini_model: str = "gemini-2.5-flash"
     google_api_key: str | None = None
 
     @property

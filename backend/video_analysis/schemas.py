@@ -33,7 +33,8 @@ class DetectedPlayer(BaseModel):
 
 class DetectPlayersRequest(BaseModel):
     video_id: str
-    max_players: int = Field(default=4, ge=2, le=8)
+    match_type: Literal["singles", "doubles", "mixed"] = "singles"
+    max_players: int | None = Field(default=None, ge=2, le=8)
 
 
 class DetectPlayersResponse(BaseModel):
@@ -49,6 +50,10 @@ class AnalyzeVideoRequest(BaseModel):
     user_id: str = "aigerim"
     match_type: Literal["singles", "doubles", "mixed"]
     target_track_ids: list[int] = Field(..., min_length=1, max_length=4)
+    debug: bool = False
+    target_label: str | None = None
+    target_jersey_color: str | None = None
+    target_court_side: Literal["near", "far", "unknown"] | None = None
 
 
 class SpeedByMinute(BaseModel):
@@ -82,6 +87,23 @@ class DoublesTeamMetrics(BaseModel):
     players: list[PlayerMovementMetrics]
 
 
+class TimeRangeLabel(BaseModel):
+    start: str
+    end: str
+
+
+class IgnoredSegment(TimeRangeLabel):
+    reason: str
+
+
+class SegmentFilterSummary(BaseModel):
+    valid_segments: list[TimeRangeLabel] = Field(default_factory=list)
+    ignored_segments: list[IgnoredSegment] = Field(default_factory=list)
+    valid_gameplay_ratio: float = 0.0
+    analysis_confidence: float = 0.0
+    warning: str | None = None
+
+
 class VideoMetricsSummary(BaseModel):
     video_id: str
     match_type: Literal["singles", "doubles", "mixed"]
@@ -91,6 +113,7 @@ class VideoMetricsSummary(BaseModel):
     disclaimer: str
     singles: PlayerMovementMetrics | None = None
     doubles: DoublesTeamMetrics | None = None
+    segment_filter: SegmentFilterSummary | None = None
     raw_notes: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -117,8 +140,19 @@ class VideoMemorySummary(BaseModel):
     athlete_baseline: dict | None = None
 
 
+class VideoDebugSummary(BaseModel):
+    valid_gameplay_ratio: float = 0.0
+    players_found: int = 0
+    tracking_stability: float = 0.0
+    gemini_sec: float | None = None
+    total_sec: float | None = None
+
+
 class AnalyzeVideoResponse(BaseModel):
     video_id: str
     metrics: VideoMetricsSummary
     coaching_feedback: CoachingFeedback
     memory_summary: VideoMemorySummary | None = None
+    debug_report_id: str | None = None
+    debug_available: bool = False
+    debug_summary: VideoDebugSummary | None = None

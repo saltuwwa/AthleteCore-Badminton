@@ -145,6 +145,10 @@ def payload_to_episode_row(payload: dict[str, Any]) -> dict[str, Any]:
         f"duration {payload['video_duration_sec']:.0f}s, "
         f"issues={', '.join(payload.get('detected_issues') or []) or 'none'}"
     )
+    from datetime import date
+
+    from app.memory.constants import SESSION_MATCH, SOURCE_VIDEO_PIPELINE
+
     return {
         "type": "event",
         "key": f"video.analysis.{vid}",
@@ -153,10 +157,17 @@ def payload_to_episode_row(payload: dict[str, Any]) -> dict[str, Any]:
         "supersedes_same_key": True,
         "memory_layer": "episodic",
         "event_type": "video_analysis",
+        "session_type": SESSION_MATCH,
         "importance": float(payload.get("importance", 0.6)),
         "is_repeated_pattern": False,
         "is_user_confirmed": False,
         "payload": payload,
+        "source": SOURCE_VIDEO_PIPELINE,
+        "event_date": date.today(),
+        "facts": {
+            "detected_issues": payload.get("detected_issues") or [],
+            "match_type": payload.get("match_type"),
+        },
     }
 
 

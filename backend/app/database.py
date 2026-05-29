@@ -26,8 +26,11 @@ AsyncSessionLocal = async_sessionmaker(
 
 
 async def init_db() -> None:
+    from app.memory.migrate import ensure_memory_schema_v2
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_memory_schema_v2(engine)
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

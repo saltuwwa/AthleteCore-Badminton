@@ -10,11 +10,18 @@ async def embed_query(
     *,
     dimensions: int | None = None,
 ) -> list[float]:
+    from app.cache.embedding_cache import get_cached_embedding, set_cached_embedding
+
+    cached = get_cached_embedding(model, text, dimensions=dimensions)
+    if cached is not None:
+        return cached
     kwargs: dict = {"model": model, "input": text}
     if dimensions is not None:
         kwargs["dimensions"] = dimensions
     resp = await client.embeddings.create(**kwargs)
-    return list(resp.data[0].embedding)
+    vector = list(resp.data[0].embedding)
+    set_cached_embedding(model, text, dimensions=dimensions, vector=vector)
+    return vector
 
 
 async def embed_texts(
@@ -26,11 +33,32 @@ async def embed_texts(
 ) -> list[list[float]]:
     if not texts:
         return []
-    kwargs: dict = {"model": model, "input": texts}
-    if dimensions is not None:
-        kwargs["dimensions"] = dimensions
-    resp = await client.embeddings.create(**kwargs)
-    return [list(d.embedding) for d in resp.data]
+    from app.cache.embedding_cache import get_cached_embedding, set_cached_embedding
+
+    out: list[list[float] | None] = [None] * len(texts)
+    missing_idx: list[int] = []
+    missing_texts: list[str] = []
+    for i, text in enumerate(texts):
+        hit = get_cached_embedding(model, text, dimensions=dimensions)
+        if hit is not None:
+            out[i] = hit
+        else:
+            missing_idx.append(i)
+            missing_texts.append(text)
+    if missing_texts:
+        kwargs: dict = {"model": model, "input": missing_texts}
+        if dimensions is not None:
+            kwargs["dimensions"] = dimensions
+        resp = await client.embeddings.create(**kwargs)
+        for j, d in enumerate(resp.data):
+            idx = missing_idx[j]
+            vector = list(d.embedding)
+            out[idx] = vector
+            set_cached_embedding(
+                model, texts[idx], dimensions=dimensions, vector=vector
+            )
+    assert all(v is not None for v in out)
+    return [v for v in out]  # type: ignore[misc]
 
 
 def openai_client(settings: Settings) -> AsyncOpenAI:

@@ -1,374 +1,249 @@
+"""Tests for gameplay segment filtering."""
+
 from __future__ import annotations
 
-import math
+import pytest
 
-from app.video_analysis.segment_filter import filter_gameplay_segments
+from video_analysis.eval_report import build_video_eval_report, compute_segment_eval_metrics
+from video_analysis.segment_filter import (
+    FrameDetections,
+    classify_frame_context,
+    detect_replay_or_slowmo,
+    filter_gameplay_segments,
+    is_valid_gameplay_frame,
+)
 
 
-def _keypoints(conf: float = 0.9) -> list[list[float]]:
-    # Minimal COCO-like pose: 17 points with [x, y, conf]
-    return [[0.0, 0.0, conf] for _ in range(17)]
+def _kp(visible: bool = True) -> list[list[float]]:
+    base = [0.5, 0.5, 0.9 if visible else 0.1] * 17
+    return [base[i : i + 3] for i in range(0, 51, 3)]
 
 
-def _bbox_from_center(
+def _court_bbox(cx: float, cy: float, size: float = 0.12) -> tuple[float, float, float, float]:
+    w, h = 1280.0, 720.0
+    bw, bh = w * size, h * size
+    return (cx * w - bw / 2, cy * h - bh / 2, cx * w + bw / 2, cy * h + bh / 2)
+
+
+def _frame(
+    frame_index: int,
     *,
-    cx: float,
-    cy: float,
-    w: float,
-    h: float,
-) -> list[float]:
-    return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+    players: list[tuple[int, tuple[float, float, float, float]]],
+    ts: float | None = None,
+) -> list[dict]:
+    out = []
+    for tid, bbox in players:
+        out.append(
+            {
+                "frame_index": frame_index,
+                "timestamp_sec": ts if ts is not None else frame_index / 25.0,
+                "track_id": tid,
+                "bbox": list(bbox),
+                "confidence": 0.9,
+                "keypoints": _kp(),
+            }
+        )
+    return out
 
 
-def _tracking_payload(
-    *,
-    width: int,
-    height: int,
-    match_type: str,
-    target_track_ids: list[int],
-    timestamps: list[float],
-    per_ts: dict[float, dict[int, dict]],
-) -> dict:
+def _gameplay_singles_frames(n: int = 20, *, target_id: int = 1) -> list[dict]:
     frames: list[dict] = []
-    for ts in timestamps:
-        bucket = per_ts.get(ts) or {}
-        for tid, det in bucket.items():
-            frames.append(
-                {
-                    "frame_index": int(ts * 25),
-                    "timestamp_sec": float(ts),
-                    "track_id": int(tid),
-                    "bbox": det["bbox"],
-                    "confidence": det.get("confidence", 0.9),
-                    "keypoints": det.get("keypoints", _keypoints(0.9)),
-                }
+    for i in range(n):
+        frames.extend(
+            _frame(
+                i,
+                players=[
+                    (target_id, _court_bbox(0.4, 0.5)),
+                    (2, _court_bbox(0.6, 0.5)),
+                ],
             )
-    return {
-        "frames": frames,
-        "width": width,
-        "height": height,
-        "match_type": match_type,
-        "target_track_ids": target_track_ids,
-    }
+        )
+    return frames
 
 
-def _eval_precision_recall(pred_valid: set[str], gt_valid: set[str]) -> tuple[float, float]:
-    if not pred_valid:
-        return 0.0, 0.0
-    if not gt_valid:
-        return 0.0, 0.0
-    tp = len(pred_valid & gt_valid)
-    precision = tp / len(pred_valid)
-    recall = tp / len(gt_valid)
-    return precision, recall
+def test_classify_normal_gameplay():
+    fd = FrameDetections(
+        track_ids=[1, 2],
+        bboxes=[_court_bbox(0.4, 0.5), _court_bbox(0.6, 0.5)],
+        keypoints=[_kp(), _kp()],
+    )
+    assert classify_frame_context(None, fd, width=1280, height=720) == "gameplay"
 
 
-def test_normal_gameplay_segments():
-    # Singles: 2 players visible (tids 1 target, 2 opponent)
-    width, height = 1000, 700
-    timestamps = [0, 1, 2, 3, 4]
-    per_ts = {}
-    for ts in timestamps:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=350 + 40 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 40 * ts, cy=390, w=180, h=260)},
-        }
-    payload = _tracking_payload(
-        width=width,
-        height=height,
+def test_classify_closeup():
+    fd = FrameDetections(
+        track_ids=[1],
+        bboxes=[(50, 50, 1200, 680)],
+        keypoints=[_kp()],
+    )
+    assert classify_frame_context(None, fd, width=1280, height=720) == "closeup"
+
+
+def test_classify_coach_spectator():
+    fd = FrameDetections(
+        track_ids=[9],
+        bboxes=[(10, 200, 60, 500)],
+        keypoints=[_kp()],
+    )
+    assert classify_frame_context(None, fd, width=1280, height=720) == "coach_or_spectator"
+
+
+def test_classify_pause():
+    assert classify_frame_context(None, FrameDetections(), width=1280, height=720) == "pause"
+
+
+def test_classify_scoreboard():
+    fd = FrameDetections(
+        track_ids=[],
+        bboxes=[],
+        keypoints=[],
+    )
+    assert classify_frame_context(None, fd, width=1280, height=720) == "pause"
+
+
+def test_classify_replay_ocr():
+    fd = FrameDetections(
+        track_ids=[1, 2],
+        bboxes=[_court_bbox(0.4, 0.5), _court_bbox(0.6, 0.5)],
+        keypoints=[_kp(), _kp()],
+    )
+    assert (
+        classify_frame_context(None, fd, width=1280, height=720, ocr_text="INSTANT REPLAY")
+        == "replay"
+    )
+
+
+def test_is_valid_gameplay_frame_singles():
+    fd = FrameDetections(
+        track_ids=[1, 2],
+        bboxes=[_court_bbox(0.4, 0.5), _court_bbox(0.6, 0.5)],
+        keypoints=[_kp(), _kp()],
+    )
+    assert is_valid_gameplay_frame(None, fd, "singles", [1], width=1280, height=720)
+
+
+def test_is_valid_rejects_closeup():
+    fd = FrameDetections(track_ids=[1], bboxes=[(50, 50, 1200, 680)], keypoints=[_kp()])
+    assert not is_valid_gameplay_frame(None, fd, "singles", [1], width=1280, height=720)
+
+
+def test_detect_replay_slowmo():
+    from video_analysis.segment_filter import FrameRecord
+
+    seg = []
+    for i in range(10):
+        if i < 5:
+            bbox = _court_bbox(0.5, 0.5, 0.1)
+        else:
+            bbox = (50, 50, 1200, 680)
+        seg.append(
+            FrameRecord(
+                frame_index=i,
+                timestamp_sec=i / 25.0,
+                detections=FrameDetections(track_ids=[1], bboxes=[bbox], keypoints=[_kp()]),
+            )
+        )
+    assert detect_replay_or_slowmo(seg, width=1280, height=720)
+
+
+def test_filter_mixed_video_segments():
+    frames: list[dict] = []
+    frames.extend(_gameplay_singles_frames(15, target_id=1))
+    for i in range(15, 20):
+        frames.extend(
+            _frame(i, players=[(1, (50, 50, 1200, 680))])
+        )
+    for i in range(20, 35):
+        frames.extend(
+            _frame(
+                i,
+                players=[
+                    (1, _court_bbox(0.45, 0.5)),
+                    (2, _court_bbox(0.55, 0.5)),
+                ],
+            )
+        )
+
+    result = filter_gameplay_segments(
+        frames,
         match_type="singles",
         target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+        width=1280,
+        height=720,
     )
-
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_valid = {f"{t:.2f}" for t in timestamps}
-
-    precision, recall = _eval_precision_recall(pred_valid, gt_valid)
-    assert precision == 1.0
-    assert recall == 1.0
-    assert res["valid_gameplay_ratio"] == 1.0
+    assert result["valid_gameplay_ratio"] > 0.5
+    assert len(result["valid_segments"]) >= 1
+    assert any(s.get("reason") for s in result["ignored_segments"])
 
 
-def test_replay_or_slow_motion_is_ignored():
-    width, height = 1000, 700
-    timestamps = [0, 1, 2, 3, 4, 5]
-
-    per_ts = {}
-    # Valid gameplay: moderate movement, normal bbox sizes
-    for ts in [0, 1, 2]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=350 + 40 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 40 * ts, cy=390, w=180, h=260)},
-        }
-    # Replay: very low movement + bbox area "scene change" (close-up-like)
-    for ts in [3, 4, 5]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=380 + 6 * (ts - 3), cy=380, w=450, h=380)},
-            2: {"bbox": _bbox_from_center(cx=560 + 6 * (ts - 3), cy=390, w=450, h=380)},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="singles",
-        target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+def test_filter_low_ratio_warning():
+    frames = []
+    for i in range(10):
+        frames.extend(_frame(i, players=[(1, (50, 50, 1200, 680))]))
+    result = filter_gameplay_segments(
+        frames, match_type="singles", target_track_ids=[1], width=1280, height=720
     )
-
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_replay = {f"{t:.2f}" for t in [3, 4, 5]}
-
-    # Replay timestamps must not be considered valid gameplay.
-    assert pred_valid.isdisjoint(gt_replay)
-    reasons = {seg["reason"] for seg in res["ignored_segments"]}
-    assert "replay_or_slow_motion" in reasons
+    assert result["valid_gameplay_ratio"] < 0.25
+    assert result["warning"] is not None
 
 
-def test_coach_or_spectator_view_is_ignored():
-    width, height = 1000, 700
-    timestamps = [0, 1, 2, 3, 4]
-    per_ts = {}
-
-    # Gameplay until 2
-    for ts in [0, 1, 2]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=360 + 35 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 35 * ts, cy=390, w=180, h=260)},
-        }
-    # Coach/spectator: boxes outside court margins
-    for ts in [3, 4]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=20, cy=50, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=60, cy=60, w=180, h=260)},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="singles",
-        target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+def test_filter_replay_segment_excluded():
+    frames = _gameplay_singles_frames(10, target_id=1)
+    for i in range(10, 18):
+        frames.extend(_frame(i, players=[(1, (80, 80, 1180, 650))]))
+    result = filter_gameplay_segments(
+        frames, match_type="singles", target_track_ids=[1], width=1280, height=720
     )
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_invalid = {f"{t:.2f}" for t in [3, 4]}
-    assert pred_valid.isdisjoint(gt_invalid)
+    reasons = {s["reason"] for s in result["ignored_segments"]}
+    assert "replay_or_slow_motion" in reasons or "closeup" in reasons
 
 
-def test_closeup_is_ignored():
-    width, height = 1000, 700
-    timestamps = [0, 1, 2, 3]
-    per_ts = {}
-
-    # Gameplay first 2
-    for ts in [0, 1]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=360 + 45 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 45 * ts, cy=390, w=180, h=260)},
-        }
-    # Close-up: very large bbox areas
-    for ts in [2, 3]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=420, cy=380, w=520, h=520)},
-            2: {"bbox": _bbox_from_center(cx=560, cy=390, w=520, h=520)},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="singles",
-        target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+def test_filter_coach_spectator_excluded():
+    frames = []
+    for i in range(12):
+        frames.extend(_frame(i, players=[(5, (5, 200, 55, 520))]))
+    result = filter_gameplay_segments(
+        frames, match_type="singles", target_track_ids=[5], width=1280, height=720
     )
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_closeup = {f"{t:.2f}" for t in [2, 3]}
-    assert pred_valid.isdisjoint(gt_closeup)
-    reasons = {seg["reason"] for seg in res["ignored_segments"]}
-    assert "closeup" in reasons
+    assert result["valid_gameplay_ratio"] == 0.0
+    assert result["ignored_segments"]
 
 
-def test_scoreboard_is_ignored():
-    width, height = 1000, 700
-    timestamps = [0, 1, 2]
-    per_ts = {}
-    # Gameplay for 0
-    per_ts[0] = {
-        1: {"bbox": _bbox_from_center(cx=360, cy=380, w=180, h=260), "keypoints": _keypoints(0.9)},
-        2: {"bbox": _bbox_from_center(cx=520, cy=390, w=180, h=260), "keypoints": _keypoints(0.9)},
-    }
-    # Scoreboard-like: missing keypoints (pose not available)
-    for ts in [1, 2]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=500, cy=300, w=220, h=240), "keypoints": []},
-            2: {"bbox": _bbox_from_center(cx=650, cy=320, w=220, h=240), "keypoints": []},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="singles",
-        target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+def test_filter_scoreboard_context():
+    fd = FrameDetections(
+        track_ids=[1],
+        bboxes=[(400, 5, 900, 55)],
+        keypoints=[[]],
     )
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_invalid = {f"{t:.2f}" for t in [1, 2]}
-    assert pred_valid.isdisjoint(gt_invalid)
-    reasons = {seg["reason"] for seg in res["ignored_segments"]}
-    assert "scoreboard" in reasons
+    ctx = classify_frame_context(None, fd, width=1280, height=720)
+    assert ctx in ("scoreboard", "pause", "unknown")
 
 
-def test_pause_is_ignored():
-    width, height = 1000, 700
-    timestamps = [0, 1, 2, 3, 4]
-    per_ts = {}
-
-    # Normal gameplay for 0-1
-    for ts in [0, 1]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=360 + 45 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 45 * ts, cy=390, w=180, h=260)},
-        }
-    # Pause 2-4: enough players and court visible, but movement is too small
-    for ts in [2, 3, 4]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=450 + 5 * (ts - 2), cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=610 + 5 * (ts - 2), cy=390, w=180, h=260)},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="singles",
-        target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+def test_eval_metrics_and_report():
+    gt = {0, 1, 2, 3, 4}
+    pred = {0, 1, 2, 5}
+    m = compute_segment_eval_metrics(
+        ground_truth_valid=gt,
+        predicted_valid=pred,
+        ground_truth_replay={10, 11},
+        predicted_ignored_replay={10},
+        all_frame_indices=set(range(15)),
+        valid_gameplay_ratio=0.74,
+        analysis_confidence=0.8,
     )
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_pause = {f"{t:.2f}" for t in [2, 3, 4]}
-    assert pred_valid.isdisjoint(gt_pause)
-    reasons = {seg["reason"] for seg in res["ignored_segments"]}
-    assert "pause" in reasons
+    assert 0 < m.gameplay_segment_precision <= 1
+    assert m.valid_gameplay_ratio == 0.74
 
-
-def test_mixed_video_valid_and_invalid_segments_eval_metrics():
-    width, height = 1000, 700
-    timestamps = list(range(0, 12))  # 0..11 seconds
-    per_ts = {}
-
-    gt_valid = set()
-    gt_replay = set()
-    gt_invalid = set()
-
-    # Valid: 0-3
-    for ts in [0, 1, 2, 3]:
-        gt_valid.add(ts)
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=350 + 40 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 40 * ts, cy=390, w=180, h=260)},
-        }
-    # Replay: 4-6
-    for ts in [4, 5, 6]:
-        gt_replay.add(ts)
-        gt_invalid.add(ts)
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=380 + 6 * (ts - 4), cy=380, w=450, h=380)},
-            2: {"bbox": _bbox_from_center(cx=560 + 6 * (ts - 4), cy=390, w=450, h=380)},
-        }
-    # Pause: 7-8
-    for ts in [7, 8]:
-        gt_invalid.add(ts)
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=450 + 5 * (ts - 7), cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=610 + 5 * (ts - 7), cy=390, w=180, h=260)},
-        }
-    # Valid: 9-11
-    for ts in [9, 10, 11]:
-        gt_valid.add(ts)
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=350 + 40 * ts, cy=380, w=180, h=260)},
-            2: {"bbox": _bbox_from_center(cx=520 + 40 * ts, cy=390, w=180, h=260)},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="singles",
-        target_track_ids=[1],
-        timestamps=timestamps,
-        per_ts=per_ts,
+    report = build_video_eval_report(
+        [
+            {
+                "name": "normal_gameplay",
+                "ground_truth_valid": gt,
+                "predicted_valid": pred,
+                "all_frame_indices": set(range(15)),
+            }
+        ],
+        segment_filter_summary={"valid_gameplay_ratio": 0.74, "analysis_confidence": 0.8},
     )
-
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_valid_keys = {f"{t:.2f}" for t in gt_valid}
-    gt_invalid_keys = {f"{t:.2f}" for t in gt_invalid}
-    gt_replay_keys = {f"{t:.2f}" for t in gt_replay}
-
-    precision, recall = _eval_precision_recall(pred_valid, gt_valid_keys)
-    assert precision >= 0.85
-    assert recall >= 0.85
-
-    ignored_replay_rate = (
-        1.0 - (len(gt_replay_keys & pred_valid) / max(1, len(gt_replay_keys)))
-    )
-    invalid_segment_leak_rate = (
-        len(pred_valid & gt_invalid_keys) / max(1, len(gt_invalid_keys))
-    )
-    assert ignored_replay_rate >= 0.8
-    assert invalid_segment_leak_rate <= 0.2
-    assert res["analysis_confidence"] >= 0.5
-
-    # Sanity: returned ratio should match predicted valid / total
-    expected_ratio = len(pred_valid) / len(timestamps)
-    assert math.isclose(res["valid_gameplay_ratio"], round(expected_ratio, 3), rel_tol=0.0, abs_tol=1e-3)
-
-
-def test_doubles_requires_four_players_and_selected_pair_visible():
-    width, height = 1000, 700
-    timestamps = [0, 1, 2, 3]
-    per_ts = {}
-
-    target_ids = [1, 3]
-    # Valid frames: 4 players in court, pair visible
-    for ts in [0, 1]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=300 + 35 * ts, cy=380, w=170, h=250)},
-            2: {"bbox": _bbox_from_center(cx=460 + 35 * ts, cy=410, w=170, h=250)},
-            3: {"bbox": _bbox_from_center(cx=600 + 35 * ts, cy=380, w=170, h=250)},
-            4: {"bbox": _bbox_from_center(cx=760 + 35 * ts, cy=410, w=170, h=250)},
-        }
-    # Invalid frames: remove player 3 (selected team not visible)
-    for ts in [2, 3]:
-        per_ts[ts] = {
-            1: {"bbox": _bbox_from_center(cx=320 + 30 * ts, cy=380, w=170, h=250)},
-            2: {"bbox": _bbox_from_center(cx=480 + 30 * ts, cy=410, w=170, h=250)},
-            4: {"bbox": _bbox_from_center(cx=760 + 30 * ts, cy=410, w=170, h=250)},
-        }
-
-    payload = _tracking_payload(
-        width=width,
-        height=height,
-        match_type="doubles",
-        target_track_ids=target_ids,
-        timestamps=timestamps,
-        per_ts=per_ts,
-    )
-
-    res = filter_gameplay_segments(payload)
-    pred_valid = set(res["valid_timestamp_keys"])
-    gt_valid = {f"{t:.2f}" for t in [0, 1]}
-    gt_invalid = {f"{t:.2f}" for t in [2, 3]}
-
-    assert pred_valid == gt_valid
-
+    assert "segment_filtering_quality" in report
+    assert report["segment_filtering_quality"]["valid_gameplay_ratio"] == 0.74

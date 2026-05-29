@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppLayout } from './components/layout/AppLayout'
 import { AnalysisPage } from './pages/AnalysisPage'
 import { VideoAnalysisPage } from './pages/VideoAnalysisPage'
+import { VideoDebugPage } from './pages/VideoDebugPage'
 import { ChatPage } from './pages/ChatPage'
 import { Health } from './pages/Health'
 import { History } from './pages/History'
@@ -19,6 +20,7 @@ function App() {
         <Route path="/chat" element={<ChatPage />} />
         <Route path="/analysis" element={<AnalysisPage />} />
         <Route path="/analysis/video" element={<VideoAnalysisPage />} />
+        <Route path="/analysis/video/:videoId/debug" element={<VideoDebugPage />} />
         <Route path="/schedule" element={<Schedule />} />
         <Route path="/progress" element={<Performance />} />
         <Route path="/health" element={<Health />} />

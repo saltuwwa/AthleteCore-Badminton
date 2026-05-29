@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from app.document_analysis.schemas import MatchEntry, StructuredCompetitionData
+from app.document_analysis.table_parser import parse_table_matches
 from app.security.untrusted_content import InjectionScanResult
 
 _SCORE_RE = re.compile(
@@ -63,6 +64,22 @@ def parse_sports_entities(
                 )
             )
 
+    table_matches, table_scores, table_debug = parse_table_matches(lines)
+    if table_matches:
+        seen = {(m.player_a, m.player_b, m.score) for m in matches}
+        for m in table_matches:
+            key = (m.player_a, m.player_b, m.score)
+            if key not in seen:
+                matches.append(m)
+                seen.add(key)
+    for sc in table_scores:
+        if sc not in scores:
+            scores.append(sc)
+
+    parse_debug: dict[str, Any] | None = None
+    if table_debug.get("detected_table_format") or table_debug.get("parsed_rows"):
+        parse_debug = table_debug
+
     security_flag = "prompt_injection_detected" if injection.detected else None
     notice = None
     if injection.detected:
@@ -79,6 +96,7 @@ def parse_sports_entities(
         recommendations=[],
         security_flag=security_flag,
         security_notice=notice,
+        parse_debug=parse_debug,
     )
 
 

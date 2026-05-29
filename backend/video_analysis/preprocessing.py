@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -84,10 +85,13 @@ def probe_video(path: Path) -> dict[str, Any]:
     try:
         import cv2  # type: ignore[import-untyped]
     except ImportError as e:
-        raise HTTPException(
-            status_code=503,
-            detail="opencv-python-headless is required for video analysis",
-        ) from e
+        msg = "opencv-python-headless is required for video analysis (pip install opencv-python-headless)"
+        try:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=503, detail=msg) from e
+        except ImportError:
+            raise RuntimeError(msg) from e
 
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -107,6 +111,33 @@ def probe_video(path: Path) -> dict[str, Any]:
         "height": height,
         "duration_sec": duration_sec,
     }
+
+
+def register_video_from_path(
+    source_path: Path,
+    *,
+    filename: str | None = None,
+) -> dict[str, Any]:
+    """Register a local file for pipeline/CLI without HTTP upload."""
+    ensure_storage_root()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Video not found: {source_path}")
+
+    video_id = str(uuid.uuid4())
+    paths = video_paths(video_id)
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, paths["video"])
+
+    props = probe_video(paths["video"])
+    meta = {
+        "video_id": video_id,
+        "filename": filename or source_path.name,
+        "original_ext": source_path.suffix.lower(),
+        "upload_time": datetime.now(UTC).isoformat(),
+        **props,
+    }
+    save_meta(video_id, meta)
+    return meta
 
 
 def delete_video_artifacts(video_id: str) -> None:

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -80,6 +80,14 @@ class MemoryOut(BaseModel):
     updated_at: datetime
     supersedes: str | None
     active: bool
+    event_date: date | None = None
+    event_date_end: date | None = None
+    raw_user_text: str | None = None
+    source: str | None = None
+    sport: str | None = None
+    session_type: str | None = None
+    facts: dict[str, Any] | None = None
+    schema_version: int = 1
 
 
 class MemoriesListOut(BaseModel):
@@ -92,6 +100,17 @@ class TranscribeResponse(BaseModel):
     language: str = "ru"
 
 
+class ChatAction(BaseModel):
+    id: str
+    label: str
+    href: str | None = None
+    prefill: str | None = None
+
+
+class ChatSuggestionsOut(BaseModel):
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     message: str
     thread_id: str
@@ -100,3 +119,11 @@ class ChatResponse(BaseModel):
     analysis: dict[str, Any] | None = None
     needs_memory: bool = False
     memory_citations_count: int = 0
+    comparison_status: Literal["found", "not_found"] | None = None
+    comparison_label: str | None = None
+    chat_actions: list[ChatAction] = Field(default_factory=list)
+    analyst_trace: dict[str, Any] | None = None
+    debug_build_id: str = "semantic-router-v1"
+    latency_trace: dict[str, Any] | None = None
+    langfuse_trace_id: str | None = None
+    langfuse_trace_url: str | None = None

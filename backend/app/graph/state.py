@@ -18,8 +18,10 @@ class AthleteGraphState(TypedDict, total=False):
     memory_citations: list[dict[str, Any]]
 
     planner_decision: dict[str, Any]
+    turn_decision: dict[str, Any]
     routed_agent: AgentName
     needs_memory: bool
+    persist_memory: bool
 
     agent_outputs: Annotated[list[dict[str, Any]], operator.add]
 
@@ -27,5 +29,8 @@ class AthleteGraphState(TypedDict, total=False):
     interaction_mode: str
     coaching_tone: str
     offer_followup: str | None
+    pending_followup: dict[str, Any] | None
     final_response: str
     agents_used: list[str]
+    analyst_trace: dict[str, Any] | None
+    llm_called: bool

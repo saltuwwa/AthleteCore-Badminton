@@ -45,15 +45,32 @@ export type VideoMemorySummary = {
   athlete_baseline: Record<string, unknown> | null
 }
 
+export type SegmentFilterSummary = {
+  valid_segments: { start: string; end: string }[]
+  ignored_segments: { start: string; end: string; reason: string }[]
+  valid_gameplay_ratio: number
+  analysis_confidence: number
+  warning: string | null
+}
+
+export type VideoDebugSummary = {
+  valid_gameplay_ratio: number
+  players_found: number
+  tracking_stability: number
+  gemini_sec: number | null
+  total_sec: number | null
+}
+
+export type VideoDebugBundle = Record<string, unknown>
+
 export type AnalyzeVideoResponse = {
   video_id: string
+  debug_report_id?: string | null
+  debug_available?: boolean
+  debug_summary?: VideoDebugSummary | null
   metrics: {
     duration_sec: number
-    raw_notes?: {
-      gameplay_segment_ratio?: number
-      segment_warning?: string | null
-      excluded_replays_and_pauses?: boolean
-    }
+    segment_filter?: SegmentFilterSummary | null
     singles?: {
       relative_movement_speed_avg: number
       speed_drop_percent: number | null
@@ -85,11 +102,13 @@ export async function uploadVideo(file: File): Promise<VideoUploadResponse> {
 
 export async function detectPlayers(
   videoId: string,
-  maxPlayers = 4,
+  matchType: MatchType = 'singles',
+  maxPlayers?: number,
 ): Promise<DetectPlayersResponse> {
   const { data } = await apiClient.post<DetectPlayersResponse>('/video/detect-players', {
     video_id: videoId,
-    max_players: maxPlayers,
+    match_type: matchType,
+    max_players: maxPlayers ?? (matchType === 'singles' ? 2 : 4),
   })
   return data
 }
@@ -99,10 +118,23 @@ export async function analyzeVideo(body: {
   user_id?: string
   match_type: MatchType
   target_track_ids: number[]
+  debug?: boolean
+  target_label?: string
+  target_jersey_color?: string
+  target_court_side?: 'near' | 'far' | 'unknown'
 }): Promise<AnalyzeVideoResponse> {
-  const { data } = await apiClient.post<AnalyzeVideoResponse>('/video/analyze', {
-    user_id: body.user_id ?? 'aigerim',
-    ...body,
-  })
+  const { data } = await apiClient.post<AnalyzeVideoResponse>(
+    '/video/analyze',
+    {
+      user_id: body.user_id ?? 'aigerim',
+      ...body,
+    },
+    { params: body.debug ? { debug: true } : undefined },
+  )
+  return data
+}
+
+export async function fetchVideoDebug(videoId: string): Promise<VideoDebugBundle> {
+  const { data } = await apiClient.get<VideoDebugBundle>(`/video/${videoId}/debug`)
   return data
 }

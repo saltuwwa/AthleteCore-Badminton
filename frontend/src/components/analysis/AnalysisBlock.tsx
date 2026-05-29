@@ -37,7 +37,7 @@ type Props = {
 }
 
 export const AnalysisBlock = ({ errors, live = false }: Props) => {
-  const rows = errors?.length ? errors : defaultErrors
+  const rows = errors?.length ? errors : live ? [] : defaultErrors
 
   return (
     <section className="crosshair-corner relative rounded-2xl border border-[var(--border)] bg-[var(--surface-glass)] p-5 backdrop-blur-sm">

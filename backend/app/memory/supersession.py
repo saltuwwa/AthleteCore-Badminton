@@ -1,9 +1,10 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .constants import DEFAULT_SPORT, MEMORY_SCHEMA_VERSION
 from .mapping import parse_risk_level
 from .models import ExtractedMemoryType, Memory, MemoryLayer
 
@@ -20,6 +21,22 @@ def _coerce_layer(raw: str) -> MemoryLayer:
         return MemoryLayer(raw)
     except ValueError:
         return MemoryLayer.semantic
+
+
+def _coerce_date(raw) -> date | None:
+    if raw is None:
+        return None
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parts = raw.strip()[:10].split("-")
+            return date(int(parts[0]), int(parts[1]), int(parts[2]))
+        except (ValueError, IndexError):
+            return None
+    return None
 
 
 def _same_slot_clause(user_id: str | None, source_session: str, key: str):
@@ -66,6 +83,10 @@ async def apply_supersession_and_insert(
                 .values(active=False, updated_at=datetime.now(timezone.utc))
             )
 
+        facts = cand.get("facts")
+        if not isinstance(facts, dict):
+            facts = None
+
         row = Memory(
             user_id=user_id,
             source_session=source_session,
@@ -79,6 +100,14 @@ async def apply_supersession_and_insert(
             event_type=cand.get("event_type"),
             risk_level=parse_risk_level(cand.get("risk_level")),
             payload=cand.get("payload") or {},
+            event_date=_coerce_date(cand.get("event_date")),
+            event_date_end=_coerce_date(cand.get("event_date_end")),
+            raw_user_text=cand.get("raw_user_text"),
+            source=cand.get("source"),
+            sport=cand.get("sport") or DEFAULT_SPORT,
+            session_type=cand.get("session_type"),
+            facts=facts,
+            schema_version=int(cand.get("schema_version") or MEMORY_SCHEMA_VERSION),
             embedding=emb,
             supersedes_id=supersedes_id,
             active=True,

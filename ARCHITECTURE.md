@@ -1,415 +1,388 @@
-# AthleteCore — Архитектура
+# AthleteCore — Architecture
 
-> Сопроводительный документ к `AthleteCore_TZ.md`.
-> Все диаграммы — в Mermaid, рендерятся в GitHub, Notion, VS Code Markdown Preview.
-
----
-
-## 1. Карта системы (high-level)
-
-```mermaid
-flowchart LR
-    subgraph Client["Client · Browser"]
-        UI["React 19 SPA<br/>Vite · Tailwind v4 · Framer Motion"]
-    end
-
-    subgraph Edge["Edge / Hosting"]
-        Vercel["Vercel · static SPA"]
-    end
-
-    subgraph Backend["Backend · Render"]
-        API["FastAPI · async"]
-        Gateway["LiteLLM Gateway<br/>routing · fallback · cache"]
-        Graph["LangGraph StateGraph"]
-        MCP["MCP Server<br/>3 tools"]
-    end
-
-    subgraph Data["Data Layer"]
-        Qdrant[("Qdrant<br/>user_history<br/>sports_methodology")]
-        SQLite[("SQLite<br/>users · schedules · logs")]
-        Files[("Files · audio · pdfs")]
-    end
-
-    subgraph External["External APIs"]
-        Anthropic["Anthropic<br/>Claude Sonnet 4.5"]
-        OpenAI["OpenAI<br/>GPT-4o-mini · Whisper · embeddings"]
-        BWF["bwfbadminton.com<br/>scraping"]
-    end
-
-    subgraph Observability
-        LangSmith["LangSmith<br/>traces · evals"]
-        Sentry["Sentry<br/>error tracking"]
-    end
-
-    UI -->|HTTPS| Vercel
-    Vercel -->|API calls| API
-    API --> Graph
-    API --> MCP
-    Graph --> Gateway
-    Gateway --> Anthropic
-    Gateway --> OpenAI
-    Graph --> Qdrant
-    MCP --> SQLite
-    API --> Files
-    API -->|cron 24h| BWF
-    Graph -.->|trace| LangSmith
-    API -.->|errors| Sentry
-```
+Companion to [README.md](README.md) and [AthleteCore_TZ.md](AthleteCore_TZ.md).  
+All diagrams use **Mermaid** (GitHub, VS Code preview, defense deck).
 
 ---
 
-## 2. Поток агентов (LangGraph StateGraph)
-
-```mermaid
-flowchart TD
-    Start([User input]) --> Input
-    Input["Input Processor<br/>STT · Vision · text parse"] --> Planner
-
-    Planner{{"Planner Agent<br/>SUPERVISOR<br/>model: gpt-4o-mini · t=0.1"}}
-
-    Planner -->|"contains match data"| Analyst
-    Planner -->|"asks about schedule"| Scheduler
-    Planner -->|"asks about health"| Health
-    Planner -->|"general question"| Direct
-
-    Analyst["Analyst Agent<br/>Sonnet 4.5 · t=0.2<br/>RAG + reranker"]
-    Scheduler["Schedule Agent<br/>gpt-4o-mini · t=0.3<br/>MCP tools"]
-    Health["Health Coach Agent<br/>Sonnet 4.5 · t=0.4"]
-    Direct["Direct Answer<br/>gpt-4o-mini"]
-
-    Analyst --> Agg
-    Scheduler --> Agg
-    Health --> Agg
-    Direct --> Agg
-
-    Agg["Aggregator Node<br/>merge results"]
-    Agg --> Check{"Needs human<br/>confirmation?"}
-
-    Check -->|"yes (schedule changes)"| HITL
-    Check -->|"no"| Format
-
-    HITL[["HUMAN CHECKPOINT<br/>interrupt_before"]]
-    HITL -->|"approved"| Format
-    HITL -->|"rejected"| Planner
-
-    Format["Output Formatter<br/>JSON → UI markdown"]
-    Format --> Index["Index to user_history<br/>(Qdrant)"]
-    Index --> End([Response to user])
-
-    classDef supervisor fill:#7c6bff,color:#fff,stroke:#5a4bff
-    classDef specialist fill:#161a24,color:#e8e4f0,stroke:#7c6bff
-    classDef hitl fill:#ff6b8a,color:#fff,stroke:#cc4f6a
-    classDef terminal fill:#b8ff6b,color:#000,stroke:#9bdc52
-
-    class Planner supervisor
-    class Analyst,Scheduler,Health,Direct specialist
-    class HITL hitl
-    class End terminal
-```
-
----
-
-## 3. RAG Pipeline (retrieval)
-
-```mermaid
-flowchart LR
-    Q["User query<br/>(match log)"] --> Embed
-    Embed["OpenAI<br/>text-embedding-3-small"]
-
-    Embed --> Hist
-    Embed --> Meth
-
-    subgraph Search["Parallel search"]
-        Hist["Qdrant search<br/>collection: user_history<br/>filter: user_id<br/>k=5"]
-        Meth["Qdrant search<br/>collection: sports_methodology<br/>k=3"]
-    end
-
-    Hist --> Merge
-    Meth --> Merge
-
-    Merge["Concat top-8<br/>candidates"] --> Rerank
-    Rerank["Cross-encoder<br/>ms-marco-MiniLM-L-6-v2"] --> Top5
-    Top5["Top-5 chunks<br/>+ relevance score"] --> Ctx["Context to Analyst"]
-
-    classDef vec fill:#161a24,color:#e8e4f0,stroke:#7c6bff
-    classDef proc fill:#1d2230,color:#b8ff6b,stroke:#b8ff6b
-    class Hist,Meth vec
-    class Rerank,Merge proc
-```
-
----
-
-## 4. Voice logging (multimodal)
-
-```mermaid
-sequenceDiagram
-    actor User as Athlete
-    participant FE as Frontend
-    participant API as FastAPI
-    participant W as Whisper API
-    participant Graph as LangGraph
-    participant Q as Qdrant
-
-    User->>FE: Tap 🎙 record
-    FE->>FE: MediaRecorder (webm)
-    User->>FE: Tap stop
-    FE->>API: POST /api/transcribe (FormData)
-    API->>W: audio file
-    W-->>API: transcript text
-    API-->>FE: { text }
-    FE->>FE: Insert into input bar
-    User->>FE: Edit if needed, press Send
-    FE->>API: POST /api/chat { message }
-    API->>Graph: invoke(graph_input)
-    Graph->>Q: retrieve (user_history)
-    Q-->>Graph: top-5 chunks
-    Graph->>Graph: analyst + scheduler + health
-    Graph-->>API: aggregated response
-    API->>Q: index new log
-    API-->>FE: response + analysis
-    FE->>User: Render Message + AnalysisCard
-```
-
----
-
-## 5. Human-in-the-loop checkpoint
-
-```mermaid
-sequenceDiagram
-    participant Graph as LangGraph
-    participant API
-    participant FE as Frontend
-    actor User
-
-    Graph->>Graph: Aggregator produces draft plan
-    Graph->>Graph: interrupt_before: human_checkpoint
-    Graph-->>API: state = AWAITING_CONFIRMATION<br/>+ proposed_changes
-    API-->>FE: SSE event { type: "needs_confirmation", changes }
-    FE->>User: Highlight AI-added schedule items
-    User->>FE: Click ✓ Confirm Plan
-    FE->>API: POST /api/schedule/{id}/confirm
-    API->>Graph: resume(state, { approved: true })
-    Graph->>Graph: continue execution
-    Graph-->>API: final state
-    API-->>FE: confirmation + persisted plan
-```
-
----
-
-## 6. Multi-model routing (LiteLLM)
-
-```mermaid
-flowchart LR
-    Agent["Any agent in graph"] --> LiteLLM["LiteLLM router"]
-
-    LiteLLM --> Cache{"Semantic<br/>cache hit?"}
-    Cache -->|yes| Return["Return cached"]
-    Cache -->|no| Pick
-
-    Pick{"Pick model"}
-    Pick -->|"Analyst, Health Coach"| Sonnet["Claude Sonnet 4.5<br/>Anthropic API"]
-    Pick -->|"Planner, Scheduler, Aggregator"| Mini["GPT-4o-mini<br/>OpenAI API"]
-
-    Sonnet -->|"error / rate limit"| Fallback["Fallback to<br/>GPT-4o-mini"]
-    Sonnet -->|success| Store
-    Mini --> Store
-    Fallback --> Store
-
-    Store["Cache + return"] --> Agent
-
-    classDef primary fill:#7c6bff,color:#fff
-    classDef fallback fill:#ff6b8a,color:#fff
-    classDef cache fill:#b8ff6b,color:#000
-    class Sonnet primary
-    class Fallback fallback
-    class Cache,Store cache
-```
-
----
-
-## 7. MCP server topology
+## 1. High-level architecture
 
 ```mermaid
 flowchart TB
-    Graph["LangGraph Scheduler Agent"] -.MCP protocol.-> MCP
-
-    subgraph MCP["athletecore_mcp.py"]
-        T1["@tool get_calendar_events"]
-        T2["@tool create_training_block"]
-        T3["@tool get_performance_history"]
+    subgraph Client["Frontend · React 19 / Vite"]
+        Chat["/chat · voice + text"]
+        MockUI["/schedule /history · seed data"]
     end
 
-    T1 --> SQL[("SQLite<br/>schedule table")]
-    T2 --> SQL
-    T3 --> SQL
-    T3 --> Q[("Qdrant<br/>user_history")]
+    subgraph API["Backend · FastAPI"]
+        Main["app/main.py"]
+        Graph["LangGraph · build.py"]
+        Mem["memory/"]
+        RAG["rag/ · Qdrant"]
+        Obs["observability/ · Langfuse"]
+    end
 
-    note["Future:<br/>swap SQLite for<br/>Google Calendar API<br/>without changing<br/>agent code"]
-    SQL -.future.-> note
+    subgraph Agents["LangGraph nodes"]
+        Planner["planner · semantic_router"]
+        LoadMem["load_memory?"]
+        Spec["analyst | health_coach | scheduler | direct"]
+        Agg["aggregator"]
+    end
+
+    subgraph Data["Persistence"]
+        SQLite[("SQLite · memories, schedule, turns")]
+        Qdrant[("Qdrant · sports_methodology")]
+        CKPT[("graph_checkpoints.sqlite")]
+    end
+
+    subgraph External["LLM / STT APIs"]
+        OpenAI["OpenAI · gpt-4o-mini, Whisper, embeddings"]
+        Anthropic["Anthropic · Claude Sonnet"]
+        Gemini["Google Gemini · documents/video text"]
+    end
+
+    subgraph MCP["MCP · optional Cursor"]
+        MCPSrv["mcp_server/server.py · 4 tools"]
+    end
+
+    Chat --> Main
+    Main --> Graph
+    Graph --> Planner --> LoadMem --> Spec --> Agg
+    LoadMem --> Mem --> SQLite
+    Spec --> RAG --> Qdrant
+    Spec --> Mem
+    Graph --> Obs
+    Main --> OpenAI
+    Main --> Anthropic
+    Graph --> CKPT
+    MCPSrv --> Mem
+    MCPSrv --> RAG
+    MCPSrv --> SQLite
 ```
+
+**Separation of concerns**
+
+| Layer | Question it answers |
+|-------|---------------------|
+| **LLM / semantic router** | What does the user want this turn? Which agent? Need memory? |
+| **Backend guards** | Is past-event grounded? May we write memory? Is retrieval trusted? |
 
 ---
 
-## 8. Evals & A/B pipeline
+## 2. Request lifecycle
 
 ```mermaid
-flowchart LR
-    Dataset[("golden_dataset.json<br/>40 cases")] --> Runner
+sequenceDiagram
+    participant U as User
+    participant FE as Frontend
+    participant API as FastAPI /api/chat
+    participant G as LangGraph
+    participant P as planner
+    participant M as load_memory
+    participant A as specialist
+    participant LF as Langfuse
 
-    Runner["run_evals.py"] --> V1
-    Runner --> V2
-
-    V1["Analyst v1 · direct prompt<br/>t=0.3"]
-    V2["Analyst v2 · chain-of-thought<br/>t=0.2"]
-
-    V1 --> Judge
-    V2 --> Judge
-
-    Judge["LLM-as-judge<br/>GPT-4o · 1-5 scale"] --> Metrics
-
-    subgraph Metrics["Aggregated metrics"]
-        M1["Relevance avg"]
-        M2["Pattern accuracy"]
-        M3["Latency p50/p95"]
-        M4["Cost per query"]
+    U->>FE: text or voice draft
+    FE->>API: POST /api/chat
+    API->>LF: start trace (if enabled)
+    API->>G: ainvoke(state, thread_id)
+    G->>P: route_user_turn()
+    alt needs_memory
+        G->>M: hybrid recall SQLite
+        M-->>G: memory_context
     end
-
-    Metrics --> Report["Markdown report<br/>+ chart.png"]
-
-    Report --> LangSmith["LangSmith dataset<br/>persist results"]
+    G->>A: analyst / health / scheduler / direct
+  Note over A: RAG + methodology gate optional
+    A-->>G: draft reply
+    G->>G: aggregator_node
+    G-->>API: final_response
+    API-->>FE: JSON + dev traces
+    API->>LF: generations / spans
+    API-->>API: background memory write (gated)
 ```
+
+### Steps (one chat turn)
+
+1. **Input** — Plain text from chat; voice via `POST /api/transcribe` (Whisper) first.
+2. **Safety** — `turn_safety` checks (injection patterns, etc.) before graph.
+3. **Planner** — `planner_node` calls `route_user_turn()` (semantic router, embeddings + rules).
+4. **Branch** — `route_after_planner`: skip memory → specialist, or `load_memory` first.
+5. **Memory read** — Hybrid recall (structured + vector) if `needs_memory=true`.
+6. **Specialist** — One of Analyst / Health Coach / Scheduler / Direct runs with prompts + context tools.
+7. **Aggregator** — Single user-facing message; strips analyst JSON fence from UI text.
+8. **Post-turn** — Background extraction/write if `should_persist_memory` (write-gate).
+9. **Trace** — `latency_trace` in dev; Langfuse spans/generations when `LANGFUSE_ENABLED=true`.
+
+Code entry: `backend/app/graph/runner.py` · `backend/app/main.py` (`api_chat`).
 
 ---
 
-## 9. Deployment topology (Demo Days)
+## 3. LangGraph workflow
 
-```mermaid
-flowchart TB
-    subgraph Internet
-        User["Browser"]
-    end
-
-    subgraph Vercel["Vercel · Edge"]
-        FE["Static React build<br/>(Vite output)"]
-    end
-
-    subgraph Render["Render · backend service"]
-        Docker["Docker container"]
-        subgraph Docker
-            FastAPI["FastAPI on :8000"]
-            QdrantSvc["Qdrant on :6333<br/>persistent volume"]
-        end
-    end
-
-    subgraph SaaS["SaaS services"]
-        LS["LangSmith"]
-        Sentry["Sentry"]
-        Anthropic["Anthropic API"]
-        OpenAI["OpenAI API"]
-    end
-
-    User -->|HTTPS| FE
-    FE -->|api.athletecore.app| FastAPI
-    FastAPI --> QdrantSvc
-    FastAPI --> Anthropic
-    FastAPI --> OpenAI
-    FastAPI -.traces.-> LS
-    FastAPI -.errors.-> Sentry
-```
-
----
-
-## 10. Frontend component tree (текущий skeleton)
+**Implementation:** `backend/app/graph/build.py`
 
 ```mermaid
 flowchart TD
-    App --> Router["BrowserRouter"]
-    Router --> AppLayout
+    START([START]) --> planner[planner]
+    planner -->|route_after_planner| load_memory[load_memory]
+    planner -->|route_after_planner| analyst[analyst]
+    planner -->|route_after_planner| health[health_coach]
+    planner -->|route_after_planner| scheduler[scheduler]
+    planner -->|route_after_planner| direct[direct]
+    load_memory -->|route_after_memory| analyst
+    load_memory -->|route_after_memory| health
+    load_memory -->|route_after_memory| scheduler
+    load_memory -->|route_after_memory| direct
+    analyst --> aggregator[aggregator]
+    health --> aggregator
+    scheduler --> aggregator
+    direct --> aggregator
+    aggregator --> END([END])
+```
 
-    AppLayout --> Backdrop["app-backdrop · grain"]
-    AppLayout --> Sidebar
-    AppLayout --> Main["main · Outlet"]
-    AppLayout --> Drawer["ProfileDrawer<br/>(toggle)"]
+### Nodes
 
-    Main --> Analysis["/analysis · AnalysisPage"]
-    Main --> Schedule["/schedule · Schedule"]
-    Main --> Progress["/progress · Performance"]
-    Main --> Health["/health · Health"]
-    Main --> History["/history · History"]
+| Node | Role |
+|------|------|
+| `planner` | Intent routing, `needs_memory`, agent selection (not a separate “supervisor LLM” — semantic router) |
+| `load_memory` | LTM recall when required |
+| `analyst` | Match/training analysis, comparison, past-event guard |
+| `health_coach` | Recovery, load, wellbeing (same analyst model resolver) |
+| `scheduler` | Calendar context + `PROPOSE:` HITL lines |
+| `direct` | Small talk / general answers (`gpt-4o-mini`) |
+| `aggregator` | Final response assembly |
 
-    Sidebar --> Nav["nav items · 5 routes"]
-    Sidebar --> Agents["Agent status pills"]
-    Sidebar --> Chip["Profile chip<br/>(opens Drawer)"]
+### Why multi-agent (not one prompt)?
 
-    Drawer --> BWF["BWFRankCard<br/>(scraped, cached 24h)"]
-    Drawer --> Stats["Stats 2x2"]
-    Drawer --> Conn["Connections list"]
+- **Different tools and context** — Analyst needs RAG + memory + JSON errors; Scheduler needs calendar; Direct should stay cheap.
+- **Conditional memory** — Avoid retrieving LTM on weather or pure methodology questions (cost + noise).
+- **Guardrails** — Past-event and anti-hallucination logic attach to Analyst path in code, not hope in one mega-prompt.
+- **Model routing** — Sonnet for analysis, mini for router/direct (latency/cost trade-off).
 
-    Analysis --> Hero["Hero metrics row"]
-    Analysis --> AnaBlock["AnalysisBlock<br/>error tags HIGH/MED/LOW"]
-    Analysis --> Chat["ChatInput"]
+Checkpointer: `AsyncSqliteSaver` on `GRAPH_CHECKPOINT_PATH` for thread continuity.
 
-    Schedule --> Switcher["Month/Week/Day"]
-    Schedule --> Views["MonthView / WeekView / DayView"]
-    Schedule --> Modal["AddEventModal"]
+---
+
+## 4. Agents
+
+### Planner (semantic router)
+
+| | |
+|--|--|
+| **Role** | Classify turn: agent, `needs_memory`, interaction mode |
+| **Input** | `user_input`, thread metadata |
+| **Output** | `AgentName`, flags for graph edges |
+| **Code** | `backend/app/graph/semantic_router.py`, `planner_node` in `nodes.py` |
+| **Failure modes** | Mis-route → wrong agent; mitigated by pytest + fast-path rules |
+
+### Analyst
+
+| | |
+|--|--|
+| **Role** | Root-cause analysis, match comparison, structured `errors[]` JSON |
+| **Model** | `ANALYST_MODEL` (default Claude Sonnet) |
+| **Input** | User message + memory + optional RAG + past-event resolution |
+| **Output** | Prose + fenced JSON (stripped in UI) |
+| **Failure modes** | Hallucinated past events → `past_event_guard` blocks LLM analysis; weak RAG → answer without book citations |
+
+### Health Coach
+
+| | |
+|--|--|
+| **Role** | Fatigue, recovery, training load tone |
+| **Model** | Uses `resolve_analyst_model()` (same as Analyst) |
+| **Note** | `health_model` in TZ is **not** a separate config field in current `config.py` |
+
+### Scheduler
+
+| | |
+|--|--|
+| **Role** | Read schedule context; emit `PROPOSE:` lines for HITL blocks |
+| **Model** | Typically `gpt-4o-mini` via scheduler prompts |
+| **Failure modes** | User must confirm `pending_confirmation` in DB — no auto-commit |
+
+### Direct
+
+| | |
+|--|--|
+| **Role** | General chat without heavy memory/RAG |
+| **Model** | `PLANNER_MODEL` / mini |
+
+### Aggregator
+
+| | |
+|--|--|
+| **Role** | Normalize tone, interaction mode, follow-up offers |
+| **Output** | `final_response` to API |
+
+---
+
+## 5. Memory layer
+
+Summary — full detail: [MEMORY.md](MEMORY.md), [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md).
+
+```mermaid
+flowchart LR
+    subgraph Write["Write path"]
+        U2[User message] --> WG[write_gate]
+        WG --> EX[extraction LLM]
+        EX --> DB[(memories table)]
+    end
+    subgraph Read["Read path"]
+        Q[query] --> SR[structured_retrieval]
+        Q --> VR[vector recall]
+        SR --> CTX[memory_context]
+        VR --> CTX
+    end
+    CTX --> Analyst
+```
+
+**Stored:** facts, preferences, events, sport session types, `event_date`, `facts` JSON, embeddings, risk levels, supersession links.
+
+**STM:** LangGraph checkpoint (thread messages), not a separate vector store.
+
+---
+
+## 6. RAG pipeline
+
+| Stage | Implementation |
+|-------|----------------|
+| **Sources** | Parsed PDFs → `output/*.md` (local; LlamaParse via `scripts/parse_badminton_pdf.py`) |
+| **Chunking** | `app/rag/chunking.py` — page markers, ~900 tokens, 120 overlap |
+| **Embeddings** | OpenAI `text-embedding-3-small` |
+| **Vector DB** | Qdrant collection `sports_methodology` |
+| **Retrieval** | `app/rag/retrieve.py` + relevance filter |
+| **Rerank** | Optional cross-encoder (`DISABLE_RERANKER=1` default off) |
+| **Fallback** | Lexical search on `output/*.md` if Qdrant unavailable |
+| **Injection** | Methodology gate in graph; MCP `search_sports_methodology` for Cursor |
+
+Ingest: `scripts/ingest_methodology_qdrant.py --recreate`
+
+---
+
+## 7. MCP
+
+See [MCP.md](MCP.md). Server: `mcp_server/server.py` — tools delegate to `backend/app/mcp_tools/`.
+
+```mermaid
+sequenceDiagram
+    participant C as Cursor Agent
+    participant MCP as mcp_server
+    participant T as mcp_tools
+    participant DB as SQLite / Qdrant
+
+    C->>MCP: recall_athlete_memory(query)
+    MCP->>T: recall_athlete_memory()
+    T->>DB: hybrid recall
+    DB-->>C: JSON memories
+
+    C->>MCP: search_sports_methodology(query)
+    MCP->>T: search
+    T->>DB: Qdrant / lexical
+    DB-->>C: hits with source file
 ```
 
 ---
 
-## 11. State shape (LangGraph)
+## 8. Custom Skill
 
-```python
-class GraphState(TypedDict):
-    # Input
-    user_id: str
-    raw_input: str            # transcribed text
-    image_b64: str | None     # for Vision
+Location: `.agents/skills/athletecore/SKILL.md`  
+Doc: [SKILLS.md](SKILLS.md)
 
-    # Routing
-    selected_agents: list[Literal["analyst", "scheduler", "health_coach"]]
+---
 
-    # Per-agent results
-    analyst_output: AnalystResult | None
-    scheduler_output: ScheduleResult | None
-    health_output: HealthResult | None
+## 9. Observability
 
-    # Aggregation
-    aggregated_response: str
-    proposed_schedule_changes: list[ScheduleChange]
+| System | Status |
+|--------|--------|
+| **Langfuse** | Implemented — `backend/app/observability/langfuse_tracing.py` |
+| **latency_trace** | Dev JSON in API response when `DEVELOPMENT_MODE=true` |
+| **LangSmith** | Not wired in backend |
+| **Sentry** | Not in current backend code |
 
-    # HITL
-    awaiting_confirmation: bool
-    user_decision: Literal["approve", "reject"] | None
+See [OBSERVABILITY.md](OBSERVABILITY.md), [docs/LANGFUSE_TRACING.md](docs/LANGFUSE_TRACING.md).
 
-    # Metadata
-    trace_id: str
-    started_at: datetime
-    cost_usd: float
+---
+
+## 10. Evals
+
+| Runner | Purpose |
+|--------|---------|
+| `app.evals.run_safety_eval` | 25-case hybrid safety golden dataset |
+| `app.evals.run_chat_latency_benchmark` | Latency percentiles |
+| `app.evals.run_video_debug` | Video player-selection debug artifacts |
+
+See [EVALS.md](EVALS.md). No automated Analyst 40-case golden runner in repo.
+
+---
+
+## 11. Design decisions & trade-offs
+
+| Decision | Choice | Trade-off |
+|----------|--------|-----------|
+| Orchestration | LangGraph | Learning curve vs explicit conditional graph |
+| Analyst model | Claude Sonnet | Quality vs cost/latency |
+| Router / Direct | GPT-4o-mini | Speed and cost vs depth |
+| Memory store | SQLite + JSON embeddings | Simple deploy vs scale-out vector DB for LTM |
+| Methodology | Qdrant + lexical fallback | Ops complexity vs recall reliability |
+| MCP | stdio FastMCP | Great for Cursor; not HTTP-native for mobile app |
+| Tracing | Langfuse | Course asks LangSmith — document Langfuse as implemented choice |
+| HITL schedule | DB `pending_confirmation` | Safe but needs UI polish |
+
+---
+
+## 12. Failure modes & fallbacks
+
+| Failure | Behavior |
+|---------|----------|
+| Hallucinated past match | `past_event_guard` → `not_found` template, `llm_called=false` |
+| Weak RAG | Lower scores filtered; may answer without citations |
+| Missing athlete context | Analyst uses only user message; may ask clarifying questions |
+| Noisy Whisper | User edits draft before send |
+| MCP / tool error | MCP returns error JSON; graph tools use in-process `mcp_tools` |
+| Qdrant down | Lexical fallback if `METHODOLOGY_FALLBACK_LEXICAL=true` |
+| Langfuse down | Chat continues; tracing no-op |
+
+---
+
+## 13. Presentation mindmap
+
+```mermaid
+mindmap
+  root((AthleteCore))
+    Agents
+      LangGraph
+      Semantic router
+      Analyst Sonnet
+    Memory
+      SQLite LTM
+      Write gate
+      Past event guard
+    RAG
+      Qdrant
+      Coaching PDFs
+    MCP
+      4 tools
+      HITL schedule
+    Multimodal
+      Whisper voice
+      Documents
+      Video MVP
+    Quality
+      Safety evals 25
+      Pytest 195+
+      Langfuse traces
 ```
 
 ---
 
-## 12. Цвета и легенда диаграмм
+## Related files
 
-| Цвет | Что значит |
-|---|---|
-| 🟣 фиолетовый (`#7c6bff`) | Supervisor / основная логика |
-| 🟢 лайм (`#b8ff6b`) | Успех / финал / cache |
-| 🔴 коралл (`#ff6b8a`) | HITL / fallback / алерт |
-| ⚫ тёмный (`#161a24`) | Сервис / специалист |
-| 🟡 янтарь (`#ffc83c`) | Внимание / опционально |
-
----
-
-## 13. Что НЕ нарисовано на диаграммах (намеренно)
-
-- Authentication flow (на MVP — один юзер без auth)
-- Rate limiting (через `slowapi` middleware — стандарт)
-- Logging (через `structlog` → stdout → Render logs)
-- Background jobs (нет в MVP — всё синхронно)
-
-Эти вещи появятся в v0.3 (post Demo Days), когда продукт пойдёт в pilot с несколькими спортсменами.
-
----
-
-*ARCHITECTURE.md — v0.2 · соответствует `AthleteCore_TZ.md` v0.2*
+| Path | Topic |
+|------|-------|
+| `backend/app/graph/build.py` | Graph topology |
+| `backend/app/graph/semantic_router.py` | Routing |
+| `backend/app/memory/` | LTM |
+| `backend/app/rag/` | Methodology RAG |
+| `backend/app/config.py` | Models and feature flags |
+| `PRODUCT_DECISION_LOG.md` | Product/engineering decisions |

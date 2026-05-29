@@ -79,6 +79,10 @@ def normalize_candidate(raw: dict[str, Any]) -> dict[str, Any]:
     elif risk == RiskLevel.med:
         importance = max(importance, 0.7)
 
+    facts = raw.get("facts")
+    if not isinstance(facts, dict):
+        facts = {}
+
     return {
         "type": mem_type,
         "key": key,
@@ -93,4 +97,12 @@ def normalize_candidate(raw: dict[str, Any]) -> dict[str, Any]:
         "is_repeated_pattern": bool(raw.get("is_repeated_pattern", False)),
         "is_user_confirmed": bool(raw.get("is_user_confirmed", False)),
         "payload": raw.get("payload") if isinstance(raw.get("payload"), dict) else {},
+        "session_type": raw.get("session_type"),
+        "event_date": raw.get("event_date"),
+        "event_date_end": raw.get("event_date_end"),
+        "event_date_phrase": raw.get("event_date_phrase"),
+        "facts": facts,
+        "source": raw.get("source"),
+        "sport": raw.get("sport"),
+        "schema_version": raw.get("schema_version"),
     }

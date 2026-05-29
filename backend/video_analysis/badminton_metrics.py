@@ -5,10 +5,12 @@ from typing import Any
 
 from video_analysis.feature_extraction import MotionSample, extract_motion_series, partner_distance_series
 from video_analysis.player_tracking import frame_tracks_from_payload
+from video_analysis.segment_filter import filter_gameplay_segments, filter_tracking_payload
 from video_analysis.schemas import (
     DoublesTeamMetrics,
     KeyMoment,
     PlayerMovementMetrics,
+    SegmentFilterSummary,
     SpeedByMinute,
     VideoMetricsSummary,
 )
@@ -172,7 +174,25 @@ def build_metrics_summary(
     h = int(tracking.get("height") or 720)
     diag = (w * w + h * h) ** 0.5
 
-    tracks = frame_tracks_from_payload(tracking)
+    filter_match = "doubles" if match_type in ("doubles", "mixed") and len(target_track_ids) >= 2 else "singles"
+    segment_raw = filter_gameplay_segments(
+        tracking.get("frames", []),
+        match_type=filter_match,
+        target_track_ids=target_track_ids,
+        width=float(w),
+        height=float(h),
+        fps=fps,
+    )
+    filtered_tracking = filter_tracking_payload(tracking, segment_raw)
+    segment_filter = SegmentFilterSummary(
+        valid_segments=segment_raw["valid_segments"],
+        ignored_segments=segment_raw["ignored_segments"],
+        valid_gameplay_ratio=segment_raw["valid_gameplay_ratio"],
+        analysis_confidence=segment_raw["analysis_confidence"],
+        warning=segment_raw.get("warning"),
+    )
+
+    tracks = frame_tracks_from_payload(filtered_tracking)
     series = extract_motion_series(
         tracks,
         track_ids=set(target_track_ids),
@@ -206,7 +226,12 @@ def build_metrics_summary(
             fps=fps,
             disclaimer=DISCLAIMER,
             doubles=doubles,
-            raw_notes={"frame_diagonal_px": round(diag, 1), "tracking_frames": len(tracks)},
+            segment_filter=segment_filter,
+            raw_notes={
+                "frame_diagonal_px": round(diag, 1),
+                "tracking_frames": len(tracks),
+                "tracking_frames_total": len(tracking.get("frames", [])),
+            },
         )
 
     tid = target_track_ids[0]
@@ -219,5 +244,10 @@ def build_metrics_summary(
         fps=fps,
         disclaimer=DISCLAIMER,
         singles=singles,
-        raw_notes={"frame_diagonal_px": round(diag, 1), "tracking_frames": len(tracks)},
+        segment_filter=segment_filter,
+        raw_notes={
+            "frame_diagonal_px": round(diag, 1),
+            "tracking_frames": len(tracks),
+            "tracking_frames_total": len(tracking.get("frames", [])),
+        },
     )

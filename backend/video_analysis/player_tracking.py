@@ -38,25 +38,39 @@ def _get_pose_model():
     return _model
 
 
-def run_pose_tracking(video_path: Path, *, persist: bool = True) -> dict[str, Any]:
+def run_pose_tracking(
+    video_path: Path,
+    *,
+    persist: bool = True,
+    vid_stride: int | None = None,
+    show_progress: bool = True,
+) -> dict[str, Any]:
     """Run YOLO pose + ByteTrack/BoT-SORT on video. Returns serializable tracking payload."""
     model = _get_pose_model()
     meta_fps = 25.0
+    total_frames = 0
     try:
         import cv2
 
         cap = cv2.VideoCapture(str(video_path))
         meta_fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         cap.release()
     except Exception:
         pass
+
+    stride = vid_stride if vid_stride is not None else video_settings.yolo_vid_stride
+    if show_progress:
+        est = (total_frames // max(stride, 1)) if total_frames else "?"
+        print(f"[tracking] stride={stride} ~{est} frames @ {meta_fps:.1f} fps", flush=True)
 
     results = model.track(
         source=str(video_path),
         persist=persist,
         tracker=video_settings.yolo_tracker,
         conf=video_settings.yolo_confidence,
-        vid_stride=video_settings.yolo_vid_stride,
+        vid_stride=stride,
+        stream=True,
         verbose=False,
     )
 
@@ -64,6 +78,8 @@ def run_pose_tracking(video_path: Path, *, persist: bool = True) -> dict[str, An
     width, height = 0, 0
 
     for frame_index, result in enumerate(results):
+        if show_progress and frame_index > 0 and frame_index % 50 == 0:
+            print(f"[tracking] processed {frame_index} sampled frames…", flush=True)
         if result.orig_shape:
             height, width = int(result.orig_shape[0]), int(result.orig_shape[1])
         boxes = result.boxes
@@ -85,7 +101,7 @@ def run_pose_tracking(video_path: Path, *, persist: bool = True) -> dict[str, An
             else np.ones((kp_xy.shape[0], kp_xy.shape[1]))
         )
 
-        ts = frame_index * video_settings.yolo_vid_stride / meta_fps
+        ts = frame_index * stride / meta_fps
 
         for i, tid in enumerate(kid):
             if i >= len(xyxy):
@@ -102,7 +118,7 @@ def run_pose_tracking(video_path: Path, *, persist: bool = True) -> dict[str, An
                 )
             frames.append(
                 {
-                    "frame_index": frame_index * video_settings.yolo_vid_stride,
+                    "frame_index": frame_index * stride,
                     "timestamp_sec": round(ts, 3),
                     "track_id": int(tid),
                     "bbox": [x1, y1, x2, y2],
@@ -117,9 +133,11 @@ def run_pose_tracking(video_path: Path, *, persist: bool = True) -> dict[str, An
         "fps": meta_fps,
         "width": width,
         "height": height,
-        "frame_stride": video_settings.yolo_vid_stride,
+        "frame_stride": stride,
         "frames": frames,
     }
+    if show_progress:
+        print(f"[tracking] done — {len(frames)} detections, {frame_index + 1} sampled frames", flush=True)
     return payload
 
 
@@ -137,45 +155,128 @@ def load_tracking(video_id: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def ensure_tracking(video_id: str) -> dict[str, Any]:
+def ensure_tracking(
+    video_id: str,
+    *,
+    vid_stride: int | None = None,
+    show_progress: bool = True,
+) -> dict[str, Any]:
     paths = video_paths(video_id)
     if paths["tracking"].is_file():
+        if show_progress:
+            print("[tracking] loaded cached tracking.json", flush=True)
         return load_tracking(video_id)
     if not paths["video"].is_file():
         raise FileNotFoundError(f"Video file missing for {video_id}")
-    payload = run_pose_tracking(paths["video"])
+    payload = run_pose_tracking(
+        paths["video"],
+        vid_stride=vid_stride,
+        show_progress=show_progress,
+    )
     save_tracking(video_id, payload)
     return payload
 
 
-def aggregate_players(tracking: dict[str, Any], *, max_players: int = 4) -> list[dict[str, Any]]:
-    """Summarize track_ids for player picker UI."""
-    counts: dict[int, list[dict[str, Any]]] = {}
-    for fr in tracking.get("frames", []):
-        tid = int(fr["track_id"])
-        counts.setdefault(tid, []).append(fr)
+def aggregate_players(
+    tracking: dict[str, Any],
+    *,
+    max_players: int | None = None,
+    match_type: str = "singles",
+    video_id: str | None = None,
+    eval_output_path: Path | None = None,
+    exclude_track_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Summarize track_ids: court filter, IoU dedup, near/far selection."""
+    from video_analysis.track_postprocess import (
+        save_player_selection_eval,
+        select_players_from_tracking,
+    )
 
-    ranked = sorted(counts.items(), key=lambda x: len(x[1]), reverse=True)[:max_players]
-    players: list[dict[str, Any]] = []
-    for rank, (tid, frames) in enumerate(ranked, start=1):
-        best = max(frames, key=lambda f: f.get("confidence", 0))
-        bbox = best["bbox"]
-        players.append(
-            {
-                "track_id": tid,
-                "label": f"Player {rank}",
-                "bbox": {
-                    "x1": bbox[0],
-                    "y1": bbox[1],
-                    "x2": bbox[2],
-                    "y2": bbox[3],
-                },
-                "confidence": float(best.get("confidence", 0)),
-                "frame_index": int(best.get("frame_index", 0)),
-                "sample_count": len(frames),
-            }
+    if max_players is None:
+        max_players = 2 if match_type == "singles" else 4
+
+    players, eval_doc = select_players_from_tracking(
+        tracking,
+        match_type=match_type,
+        max_players=max_players,
+        video_id=video_id,
+        exclude_track_ids=exclude_track_ids,
+    )
+
+    if eval_output_path is not None:
+        save_player_selection_eval(eval_doc, eval_output_path)
+    elif video_id:
+        from video_analysis.debug_report import debug_report_dir
+
+        save_player_selection_eval(
+            eval_doc,
+            debug_report_dir(video_id) / "player_selection_eval.json",
         )
+
     return players
+
+
+def render_preview_candidates_frame(
+    video_path: Path,
+    tracking: dict[str, Any],
+    eval_doc: dict[str, Any],
+    *,
+    frame_index: int | None = None,
+) -> tuple[str, int]:
+    """Draw all candidate track decisions on one frame for debug review."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError("Cannot open video for preview candidates")
+
+    target_idx = frame_index if frame_index is not None else 0
+    # Prefer selected player's frame if available
+    if frame_index is None:
+        selected = eval_doc.get("selected_players") or []
+        if selected:
+            target_idx = int(selected[0].get("frame_index", 0))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        raise RuntimeError("Could not read preview candidates frame")
+
+    decision_by_tid: dict[int, dict[str, Any]] = {}
+    for d in eval_doc.get("track_decisions", []):
+        tid = int(d.get("track_id", -1))
+        if tid >= 0 and tid not in decision_by_tid:
+            decision_by_tid[tid] = d
+    selected_ids = {int(p["track_id"]) for p in (eval_doc.get("selected_players") or [])}
+
+    for fr in tracking.get("frames", []):
+        if int(fr.get("frame_index", -1)) != target_idx:
+            continue
+        tid = int(fr["track_id"])
+        d = decision_by_tid.get(tid)
+        if d is None:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in fr["bbox"]]
+        selected = tid in selected_ids
+        color = (0, 220, 120) if selected else (60, 120, 240)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        fx = int((x1 + x2) / 2)
+        fy = y2
+        cv2.circle(frame, (fx, fy), 4, (0, 255, 255), -1)
+        label = (
+            f"id {tid} {d.get('side','?')} "
+            f"f_in={d.get('footpoint_inside_green_court', d.get('footpoint_inside_court','?'))} "
+            f"ov={d.get('court_overlap_ratio','?')}"
+        )
+        reason = str(d.get("reason", ""))[:36]
+        cv2.putText(frame, label, (x1, max(y1 - 24, 16)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+        cv2.putText(frame, reason, (x1, max(y1 - 8, 28)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        raise RuntimeError("Failed to encode preview candidates image")
+    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{b64}", target_idx
 
 
 def render_preview_frame(
@@ -204,6 +305,8 @@ def render_preview_frame(
         raise RuntimeError("Could not read preview frame")
 
     player_by_tid = {p["track_id"]: p for p in players}
+    colors = [(0, 200, 120), (255, 180, 0), (0, 180, 255), (255, 100, 200)]
+    tid_color = {p["track_id"]: colors[i % len(colors)] for i, p in enumerate(players)}
     for fr in tracking.get("frames", []):
         if int(fr.get("frame_index", -1)) != target_idx:
             continue
@@ -212,7 +315,7 @@ def render_preview_frame(
             continue
         label = player_by_tid[tid]["label"]
         x1, y1, x2, y2 = [int(v) for v in fr["bbox"]]
-        color = (0, 200, 120) if tid == players[0]["track_id"] else (255, 180, 0)
+        color = tid_color.get(tid, (200, 200, 200))
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(
             frame,

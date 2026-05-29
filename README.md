@@ -1,99 +1,157 @@
 # AthleteCore
 
-AI-система карьерного менеджмента для **профессиональной бадминтонистки** (персона Айгерим): анализ матчей и тренировок, долгосрочная память, методология из coaching-книг, расписание с human-in-the-loop.
+**AI-powered sports career assistant for professional badminton athletes.**
 
-Финальный проект курса **LLM Engineer**. Репозиторий: [github.com/saltuwwa/AthleteCore-Badminton](https://github.com/saltuwwa/AthleteCore-Badminton)
+AthleteCore is a final project for the **LLM Engineer** course. It demonstrates a production-style LLM product—not a generic chatbot—with LangGraph orchestration, long-term memory, RAG over coaching books, MCP tools, voice input, safety evals, and Langfuse tracing.
 
----
-
-## Возможности
-
-| Модуль | Описание |
-|--------|----------|
-| **Чат + голос** | Whisper STT → черновик → ручная отправка → LangGraph pipeline |
-| **LangGraph** | Planner → (LTM recall) → Analyst / Health Coach / Scheduler / Direct → Aggregator |
-| **LTM** | Структурированная память в SQLite, hybrid recall, memory gate, write-gate |
-| **Методология** | Поиск по распарсенным PDF (`output/*.md`), lexical MVP (Qdrant — в плане) |
-| **Расписание** | SQLite-календарь, AI-предложения со статусом `pending_confirmation` |
-| **MCP** | Собственный stdio-сервер с 4 domain tools для Cursor |
-| **Skill** | `.agents/skills/athletecore/SKILL.md` — домен, триггеры, workflows |
+Repository: [github.com/saltuwwa/AthleteCore-Badminton](https://github.com/saltuwwa/AthleteCore-Badminton)
 
 ---
 
-## Стек
+## Problem
 
-- **Frontend:** React 19, Vite, TypeScript, Tailwind CSS v4
-- **Backend:** FastAPI, LangGraph, LiteLLM (OpenAI + Anthropic), SQLite
-- **STT:** OpenAI Whisper
-- **Парсинг PDF:** LlamaParse (`scripts/parse_badminton_pdf.py`)
+Professional athletes generate rich, unstructured signals every day: match logs, fatigue, technique issues, schedule conflicts, and recovery needs. A one-shot chatbot forgets context, cannot cite coaching methodology, and may hallucinate past events. Athletes need a **memory-driven assistant** that:
+
+- Remembers recurring errors and preferences across sessions
+- Grounds advice in parsed coaching literature (not invented drills)
+- Routes complex turns to specialized agents (analysis vs schedule vs wellbeing)
+- Proposes calendar changes with human confirmation (HITL)
 
 ---
 
-## Структура репозитория
+## Solution
+
+AthleteCore combines:
+
+| Capability | What it does |
+|------------|----------------|
+| **Multi-agent LangGraph** | Semantic router → optional LTM recall → Analyst / Health Coach / Scheduler / Direct → Aggregator |
+| **Long-term memory (LTM)** | SQLite + embeddings; write-gate; structured sport events; past-event guard |
+| **Methodology RAG** | Qdrant `sports_methodology` over `output/*.md` (+ lexical fallback) |
+| **Voice logging** | Whisper STT → draft → user sends → graph pipeline |
+| **MCP server** | 4 domain tools for Cursor/agents |
+| **Custom Skill** | `.agents/skills/athletecore/SKILL.md` |
+| **Safety evals** | 25-case golden dataset + deterministic checkers |
+| **Observability** | Langfuse traces + dev `latency_trace` |
+
+Demo persona: professional badminton athlete **Aigerim** (course scenario).
+
+---
+
+## Key Features
+
+- Voice logging (`POST /api/transcribe`, Whisper)
+- Personalized memory (hybrid recall, supersession, write-gate)
+- Match/training analysis (Analyst agent, structured JSON errors)
+- RAG-based methodology search (Qdrant + chunking)
+- Agent workflow with conditional routing
+- MCP tools (memory, RAG, schedule, HITL propose)
+- Custom AthleteCore Skill for Cursor
+- Hybrid safety evals + Langfuse tracing
+- React demo frontend (chat, video, schedule UI)
+
+---
+
+## Demo Flow
+
+1. User opens **Chat** (`/chat`) — backend health shows **CONNECTED**.
+2. User records a **voice training/match log** → Whisper transcribes to draft text.
+3. User edits and sends → `POST /api/chat` starts LangGraph.
+4. **Planner** (semantic router) classifies intent → may **load_memory** from SQLite LTM.
+5. **Analyst** (or Health/Scheduler/Direct) runs with memory + optional RAG context.
+6. **Aggregator** assembles final reply; background job may **write** new memories (gated).
+7. Optional: Scheduler proposes `pending_confirmation` calendar block (HITL).
+
+See [RUNBOOK.md](RUNBOOK.md) and [PRESENTATION_BRIEF.md](PRESENTATION_BRIEF.md) for defense demo scripts.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | React 19, Vite, TypeScript, Tailwind CSS v4 |
+| Backend | FastAPI, SQLAlchemy (async SQLite), LangGraph |
+| LLM routing | LiteLLM (`backend/app/graph/llm.py`) |
+| Planner / Direct | `gpt-4o-mini` (config: `PLANNER_MODEL`) |
+| Analyst | `claude-sonnet-4-20250514` (config: `ANALYST_MODEL`) |
+| Embeddings | OpenAI `text-embedding-3-small` (1536d) |
+| Vector DB | Qdrant (`sports_methodology`) |
+| STT | OpenAI Whisper (`whisper-1`) |
+| MCP | FastMCP stdio server (`mcp_server/server.py`) |
+| Tracing | **Langfuse** (not LangSmith in current code) |
+| Evals | Hybrid safety runner (`backend/app/evals/`) |
+| PDF ingest | LlamaParse → `output/*.md` |
+
+---
+
+## Architecture Overview
+
+```
+User (text/voice) → FastAPI → LangGraph (planner → memory? → specialist → aggregator)
+                              ↓                    ↓              ↓
+                         SQLite LTM          Qdrant RAG      MCP tools (optional)
+                              ↓
+                         Langfuse trace (if enabled)
+```
+
+Full diagrams and request lifecycle: **[ARCHITECTURE.md](ARCHITECTURE.md)**
+
+Memory deep dive: **[MEMORY.md](MEMORY.md)** · **[MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md)**
+
+---
+
+## Repository Structure
 
 ```
 .
-├── backend/              # FastAPI, LangGraph, memory, schedule
-├── frontend/             # React SPA
-├── mcp_server/           # MCP stdio server (athletecore)
-├── scripts/              # PDF → Markdown
-├── .agents/skills/athletecore/   # Course Skill (SKILL.md)
-├── .cursor/mcp.json      # Cursor MCP config
-├── output/               # Parsed books (локально, не в git)
-├── book sources/         # Исходные PDF (локально, не в git)
-├── ARCHITECTURE.md
-├── MEMORY_ARCHITECTURE.md
-└── AthleteCore_TZ.md
+├── backend/                 # FastAPI, LangGraph, memory, RAG, evals, observability
+│   ├── app/graph/           # LangGraph nodes, semantic router, runner
+│   ├── app/memory/          # LTM extraction, recall, write-gate
+│   ├── app/rag/             # Chunking, Qdrant store, retrieval
+│   ├── app/mcp_tools/       # Shared tool implementations
+│   ├── app/evals/           # Safety eval golden datasets + runner
+│   ├── app/observability/   # Langfuse integration
+│   └── video_analysis/      # Video MVP (pose, metrics)
+├── frontend/                # React SPA (chat, video, schedule)
+├── mcp_server/              # MCP stdio server (4 tools)
+├── scripts/                 # PDF parse, Qdrant ingest
+├── .agents/skills/athletecore/  # Course custom Skill
+├── output/                  # Parsed coaching books (local, not in git)
+└── docs/                    # LANGFUSE_TRACING, LATENCY_PROFILING, etc.
 ```
 
 ---
 
-## Требования
+## Quick Start
 
-- **Python 3.11+**
-- **Node.js 18+** (для frontend)
-- Ключи API (см. ниже)
+### Requirements
 
-| Ключ | Назначение |
-|------|------------|
-| `OPENAI_API_KEY` | Whisper, Planner, embeddings, часть нод |
-| `ANTHROPIC_API_KEY` | Analyst (Claude Sonnet) — желательно |
-| `LLAMA_CLOUD_API_KEY` | Только для парсинга PDF |
-| `GOOGLE_API_KEY` | Опционально: multimodal parse (Gemini) |
+- Python 3.11+
+- Node.js 18+
+- API keys: `OPENAI_API_KEY` (required), `ANTHROPIC_API_KEY` (recommended for Analyst)
 
----
-
-## Быстрый старт (Windows)
-
-### 1. Клонирование и venv
+### Backend
 
 ```powershell
 git clone https://github.com/saltuwwa/AthleteCore-Badminton.git
 cd AthleteCore-Badminton
-
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-```
 
-> Все Python-зависимости ставьте **только в `venv`**, с активным `(venv)` в терминале.
-
-### 2. Backend
-
-```powershell
 cd backend
 copy .env.example .env
-# Заполните OPENAI_API_KEY и ANTHROPIC_API_KEY в .env
+# Edit .env with your keys
 
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --port 8001
 ```
 
-Проверка: http://127.0.0.1:8001/health  
-Документация API: http://127.0.0.1:8001/docs
+Health: http://127.0.0.1:8001/health · API docs: http://127.0.0.1:8001/docs
 
-На Windows порт **8000** часто занят — используем **8001**.
+> On Windows port **8000** is often busy — use **8001**.
 
-### 3. Frontend (второй терминал)
+### Frontend
 
 ```powershell
 cd frontend
@@ -104,169 +162,117 @@ npm install
 npm run dev
 ```
 
-Откройте http://localhost:5173 → **Главная** (`/home`) или **Чат** (`/chat`).
+Open http://localhost:5173 → **Chat** (`/chat`).
 
-### 4. Альтернатива: pip без активации venv
+Defense slides (PDF): [docs/athletecore_defense_presentation.pdf](docs/athletecore_defense_presentation.pdf)
 
-```powershell
-cd backend
-..\venv\Scripts\python.exe -m pip install -r requirements.txt
-..\venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001
-```
-
----
-
-## Переменные окружения
-
-**Backend** — `backend/.env` (шаблон: `backend/.env.example`):
-
-```env
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-...
-DATABASE_URL=sqlite+aiosqlite:///./athletecore.db
-GRAPH_CHECKPOINT_PATH=./graph_checkpoints.sqlite
-PLANNER_MODEL=gpt-4o-mini
-ANALYST_MODEL=claude-sonnet-4-20250514
-CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-DISABLE_RERANKER=1
-```
-
-**Frontend** — `frontend/.env`:
-
-```env
-VITE_API_PROXY_TARGET=http://127.0.0.1:8001
-```
-
-Файлы `.env` **не коммитятся** (см. `.gitignore`).
-
----
-
-## Методология (PDF → RAG)
-
-Исходники PDF храните локально в `book sources/`. Результат парсинга — в `output/*.md` (тоже локально, не в git).
+### Methodology RAG (optional but recommended)
 
 ```powershell
-.\venv\Scripts\Activate.ps1
-cd scripts
-pip install -r requirements-parse.txt
-
-# Пример: footwork ebook
-python parse_badminton_pdf.py --pdf "..\book sources\Badminton-Footwork-Pocket-eBook_compressed-V2.pdf"
-```
-
-Подробнее: `scripts/parsing_instruction.txt`, skill reference `.agents/skills/athletecore/references/rag-ingest.md`.
-
-Без `output/*.md` Analyst всё равно работает, но без цитат из coaching-книг.
-
-### Qdrant RAG (векторный поиск)
-
-```powershell
-# 1) Qdrant
 docker compose up -d qdrant
-
-# 2) Зависимости backend (если ещё не ставили)
-cd backend
-..\venv\Scripts\pip install -r requirements.txt
-
-# 3) Ingest всех output/*.md → коллекция sports_methodology
 cd ..
-..\venv\Scripts\python scripts\ingest_methodology_qdrant.py --recreate
+.\venv\Scripts\python scripts\ingest_methodology_qdrant.py --recreate
 ```
 
-Проверка: http://127.0.0.1:8001/health → `"methodology_rag": "qdrant"`, `methodology_vectors` > 0.
+Verify `/health` → `"methodology_rag": "qdrant"`.
 
-**Chunking:** по маркерам `<!-- page N -->`, крупные страницы режутся ~900 токенов (overlap 120).  
-**Embeddings:** `text-embedding-3-small` (1536d).  
-**Retrieval:** cosine в Qdrant; опционально cross-encoder rerank (`DISABLE_RERANKER=0`).  
-**Fallback:** если Qdrant выключен — lexical поиск по `output/*.md`.
-
----
-
-## MCP Server (курс)
-
-Собственный MCP для Cursor / Claude Desktop:
-
-| Tool | Назначение |
-|------|------------|
-| `recall_athlete_memory` | LTM hybrid recall |
-| `search_sports_methodology` | Поиск по `output/*.md` |
-| `get_training_schedule` | Календарь |
-| `propose_training_block` | Черновик события (HITL) |
-
-**Запуск вручную** (из корня проекта):
-
-```powershell
-$env:PYTHONPATH="backend"
-.\venv\Scripts\python.exe -m mcp_server.server
-```
-
-**Cursor:** `.cursor/mcp.json` → перезапуск Cursor → Settings → MCP → включить **athletecore**.
-
-Детали: [mcp_server/README.md](mcp_server/README.md)
-
----
-
-## Skill (курс)
-
-Проектный skill: [.agents/skills/athletecore/SKILL.md](.agents/skills/athletecore/SKILL.md)  
-Триггеры: badminton, AthleteCore, Analyst, матч, footwork, memory gate, Demo Days.
-
----
-
-## Основные API
-
-| Endpoint | Описание |
-|----------|----------|
-| `GET /health` | Статус backend |
-| `POST /api/chat` | Чат (LangGraph) |
-| `POST /api/transcribe` | Голос → текст (Whisper) |
-| `GET /api/schedule/events` | Календарь |
-| `POST /recall`, `POST /search` | Memory API |
-
----
-
-## Тесты (backend)
+### Evals
 
 ```powershell
 cd backend
 $env:SKIP_DB_INIT="1"
-..\venv\Scripts\python.exe -m pytest tests/ -q
+..\venv\Scripts\python.exe -m app.evals.run_safety_eval
 ```
 
----
+Details: **[EVALS.md](EVALS.md)**
 
-## Документация
-
-| Файл | Содержание |
-|------|------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Диаграммы, поток запроса |
-| [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md) | LTM/STM, recall, write-gate |
-| [AthleteCore_TZ.md](AthleteCore_TZ.md) | ТЗ, модели, чек-лист защиты |
-| [backend/README.md](backend/README.md) | Memory research, API |
-| [frontend/README.md](frontend/README.md) | Frontend |
+Full operations: **[RUNBOOK.md](RUNBOOK.md)**
 
 ---
 
-## Демо-сценарий (60–90 сек)
+## Environment Variables
 
-1. Запустить backend + frontend.
-2. Открыть **Чат**, проверить статус **CONNECTED**.
-3. Записать голосовой лог матча → проверить черновик → отправить.
-4. Получить ответ **Analyst** (карточка анализа + текст).
-5. (Опционально) запрос на план тренировки → Scheduler → `pending_confirmation` в календаре.
+Template: `backend/.env.example`. Never commit real keys.
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` | Whisper, planner, embeddings, direct path |
+| `ANTHROPIC_API_KEY` | Analyst (Claude Sonnet) |
+| `DATABASE_URL` | SQLite async (`athletecore.db`) |
+| `GRAPH_CHECKPOINT_PATH` | LangGraph thread checkpoints |
+| `PLANNER_MODEL` / `ANALYST_MODEL` | LiteLLM model IDs |
+| `QDRANT_URL`, `METHODOLOGY_*` | RAG collection and chunking |
+| `LANGFUSE_*` | Persistent tracing (optional) |
+| `DEVELOPMENT_MODE` | Dev traces in `/api/chat` response |
+| `WHISPER_MODEL`, `WHISPER_LANGUAGE` | Voice STT |
+
+See `.env.example` for video, document, and recall tuning variables.
 
 ---
 
-## Roadmap (финальный проект курса)
+## Evals and Monitoring
 
-- [x] Qdrant RAG `sports_methodology` (+ lexical fallback)
-- [ ] LangSmith трейсинг
-- [ ] Golden dataset + `EVALS.md` + A/B Analyst
-- [ ] HITL UI на Schedule (confirm/reject)
-- [ ] Презентация Demo Days
+| Doc | Content |
+|-----|---------|
+| [EVALS.md](EVALS.md) | Golden safety dataset (25 cases), metrics, commands |
+| [OBSERVABILITY.md](OBSERVABILITY.md) | Langfuse + latency profiling |
+| [docs/LANGFUSE_TRACING.md](docs/LANGFUSE_TRACING.md) | Setup and privacy modes |
 
 ---
 
-## Лицензия и автор
+## Current Status
 
-Учебный финальный проект. Код и документация — для защиты на курсе LLM Engineer.
+### Works (real API / code paths)
+
+- Chat LangGraph pipeline with semantic routing and conditional memory load
+- LTM read/write with write-gate and past-event guard
+- Qdrant methodology RAG (+ lexical fallback)
+- Whisper voice transcription
+- MCP server with 4 tools
+- Safety eval runner (25 cases)
+- Langfuse tracing (when enabled)
+- Document upload analysis (`/api/documents`)
+- Video analysis MVP (pose pipeline)
+- ~195 backend pytest tests
+- Defense PDF: `docs/athletecore_defense_presentation.pdf`
+
+### Partial / demo / planned
+
+| Area | Status |
+|------|--------|
+| Schedule / History / Progress / Health UI pages | Static seed data in frontend |
+| Analyst golden dataset (40+ cases) | Not implemented as automated runner |
+| A/B prompt/model comparison | Not in repo; TZ mentions only |
+| LangSmith | Not wired (use Langfuse) |
+| Production auth / multi-user | Not implemented |
+| BWF scraping in ARCHITECTURE diagram | Aspirational — not in current backend |
+
+---
+
+## Future Roadmap
+
+See **[ROADMAP.md](ROADMAP.md)** — coach dashboard, federation B2B2C, multi-sport, production evals, HITL schedule UI.
+
+---
+
+## Documentation Index
+
+| File | Description |
+|------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, LangGraph, diagrams |
+| [MEMORY.md](MEMORY.md) | Memory layer (presentation-friendly) |
+| [MEMORY_ARCHITECTURE.md](MEMORY_ARCHITECTURE.md) | Detailed LTM implementation |
+| [MCP.md](MCP.md) | MCP server and tools |
+| [SKILLS.md](SKILLS.md) | Custom Skill |
+| [EVALS.md](EVALS.md) | Evaluation strategy |
+| [OBSERVABILITY.md](OBSERVABILITY.md) | Tracing and debugging |
+| [PRESENTATION_BRIEF.md](PRESENTATION_BRIEF.md) | Defense slides & Q&A (RU) |
+| [RUNBOOK.md](RUNBOOK.md) | Local run & demo checklist |
+| [CHECKLIST.md](CHECKLIST.md) | Course requirements matrix |
+| [DEFENSE_PREPARATION.md](DEFENSE_PREPARATION.md) | Extended defense notes |
+
+---
+
+## License
+
+Educational final project for LLM Engineer course defense.

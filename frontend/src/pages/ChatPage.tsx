@@ -1,11 +1,15 @@
 import { motion } from 'framer-motion'
+import { useState } from 'react'
 import { ChatArea } from '../components/chat/ChatArea'
 import { ChatInput } from '../components/chat/ChatInput'
 import { PageTabs } from '../components/layout/PageTabs'
 import { useChat } from '../hooks/useChat'
 
 export const ChatPage = () => {
-  const { messages, send, showVoiceDraft, isSending, needsMemory, addAiMessage } = useChat()
+  const { messages, send, isSending, needsMemory, addAiMessage, clearChat } = useChat({
+    persistHistory: true,
+  })
+  const [inputPrefill, setInputPrefill] = useState<string | null>(null)
 
   return (
     <motion.div
@@ -21,7 +25,18 @@ export const ChatPage = () => {
               Athlete<span className="text-[var(--accent)]">Core</span>
             </h1>
           </div>
-          <PageTabs />
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={clearChat}
+              disabled={isSending}
+              className="font-mono-ui rounded-md border border-[var(--border)] px-2.5 py-1.5 text-[10px] uppercase tracking-wide text-[var(--muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text)] disabled:opacity-40"
+              title="Очистить историю чата на этом устройстве"
+            >
+              Clear chat
+            </button>
+            <PageTabs />
+          </div>
         </div>
       </header>
 
@@ -30,6 +45,7 @@ export const ChatPage = () => {
           <ChatArea
             messages={messages}
             className="min-h-[200px] flex-1 border-0 bg-transparent p-0"
+            onPrefill={setInputPrefill}
           />
         </div>
       </div>
@@ -38,11 +54,12 @@ export const ChatPage = () => {
         <div className="mx-auto max-w-3xl">
           <ChatInput
             onSend={send}
-            onVoiceTranscript={showVoiceDraft}
             onDocumentResult={addAiMessage}
             isSending={isSending}
             needsMemory={needsMemory}
             autoSendAfterVoice={false}
+            prefill={inputPrefill}
+            onPrefillApplied={() => setInputPrefill(null)}
           />
         </div>
       </footer>

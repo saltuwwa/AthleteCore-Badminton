@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from openai import APIError
@@ -22,9 +22,11 @@ from app.memory.service import MemoryContextService
 from app.memory.supersession import apply_supersession_and_insert
 from app.memory.write_gate import MemoryWriteGate
 from app.graph.build import init_graph_runtime, shutdown_graph_runtime
+from app.graph.match_comparison import build_suggestions_from_memories, fetch_event_memories
 from app.graph.runner import run_chat_graph
 from app.schemas import (
     ChatResponse,
+    ChatSuggestionsOut,
     MemoriesListOut,
     MemoryOut,
     RecallIn,
@@ -65,6 +67,14 @@ def _rows_to_memory_outs(rows: list[Memory]) -> list[MemoryOut]:
             updated_at=m.updated_at,
             supersedes=str(m.supersedes_id) if m.supersedes_id else None,
             active=m.active,
+            event_date=m.event_date,
+            event_date_end=m.event_date_end,
+            raw_user_text=m.raw_user_text,
+            source=m.source,
+            sport=m.sport,
+            session_type=m.session_type,
+            facts=m.facts,
+            schema_version=m.schema_version,
         )
         for m in rows
     ]
@@ -156,8 +166,22 @@ async def api_transcribe(audio: UploadFile = File(...)):
     )
 
 
+@app.get("/api/chat/suggestions", response_model=ChatSuggestionsOut)
+async def api_chat_suggestions(
+    user_id: str = Query("aigerim"),
+    session_id: str = Query("main"),
+    session: AsyncSession = Depends(get_session),
+):
+    """Input chips grounded in real match/training memories (no fake dates)."""
+    memories = await fetch_event_memories(
+        session, user_id=user_id, session_id=session_id, limit=40
+    )
+    return ChatSuggestionsOut(suggestions=build_suggestions_from_memories(memories))
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def api_chat(
+    background_tasks: BackgroundTasks,
     message: str = Form(...),
     user_id: str = Form("aigerim"),
     session_id: str = Form("main"),
@@ -173,17 +197,86 @@ async def api_chat(
     if image is not None:
         await image.read()  # Vision stub — wired in a later iteration
 
+    from app.graph.latency_trace import (
+        clear_latency_trace,
+        init_latency_trace,
+        log_latency_summary,
+        stage_span,
+    )
+
+    from app.observability.langfuse_tracing import (
+        clear_langfuse_context,
+        finish_api_chat_trace,
+        record_langfuse_exception,
+        start_api_chat_trace,
+    )
+
+    trace = init_latency_trace()
+    start_api_chat_trace(
+        request_id=trace.request_id,
+        user_id=user_id,
+        session_id=session_id,
+        thread_id=thread_id,
+        message=message.strip(),
+    )
     try:
-        result = await run_chat_graph(
-            session,
-            message=message.strip(),
-            user_id=user_id,
-            session_id=session_id,
-            thread_id=thread_id,
+        with stage_span("request_received"):
+            print(
+                f"[api/chat] build=semantic-router-v1 "
+                f"development_mode={settings.development_mode} user_id={user_id!r}"
+            )
+            result = await run_chat_graph(
+                session,
+                message=message.strip(),
+                user_id=user_id,
+                session_id=session_id,
+                thread_id=thread_id,
+            )
+        if result.get("memory_write_scheduled") and result.get("memory_write_payload"):
+            from app.memory.background_write import (
+                prepare_pending_memory_write,
+                schedule_memory_write,
+            )
+
+            payload = result.pop("memory_write_payload", None)
+            result.pop("memory_write_scheduled", None)
+            if payload:
+                parent_rid = trace.request_id
+                await prepare_pending_memory_write(**payload)
+                trace.set_meta("memory_write_mode", "background")
+                trace.set_meta("memory_write_scheduled", True)
+                schedule_memory_write(
+                    background_tasks,
+                    parent_request_id=parent_rid,
+                    **payload,
+                )
+
+        trace.finish()
+        lf_refs = finish_api_chat_trace(
+            result=result,
+            latency_meta=trace.meta,
+            total_latency_ms=trace.total_ms,
         )
+        if settings.development_mode:
+            result["latency_trace"] = trace.to_dict()
+            if lf_refs.get("langfuse_trace_id"):
+                result["langfuse_trace_id"] = lf_refs["langfuse_trace_id"]
+                result["langfuse_trace_url"] = lf_refs.get("langfuse_trace_url")
+        log_latency_summary(trace)
         return ChatResponse(**result)
     except Exception as e:
+        trace.finish()
+        record_langfuse_exception(e, stage="api_chat")
+        finish_api_chat_trace(
+            result={"message": "", "thread_id": thread_id or "", "agents_used": []},
+            latency_meta=trace.meta,
+            total_latency_ms=trace.total_ms,
+        )
+        log_latency_summary(trace)
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e!s}") from e
+    finally:
+        clear_latency_trace()
+        clear_langfuse_context()
 
 
 @app.get("/api/schedule/events")
@@ -239,8 +332,20 @@ async def post_turn(
 
     try:
         client = openai_client(settings)
-        candidates = await extract_memories_from_turn(client, settings, msgs)
-        candidates = write_gate.filter_candidates(candidates)
+        from app.memory.extraction import concat_user_text, extract_memories_from_turn
+        from app.memory.write_enrichment import enrich_candidates_for_turn
+
+        user_text = concat_user_text(msgs)
+        candidates = await extract_memories_from_turn(
+            client, settings, msgs, reference_date=turn.turn_timestamp
+        )
+        candidates = enrich_candidates_for_turn(
+            candidates,
+            raw_user_text=user_text,
+            turn_timestamp=turn.turn_timestamp,
+            timezone=settings.memory_timezone,
+        )
+        candidates = write_gate.filter_candidates(candidates, raw_user_text=user_text)
 
         embeddings: list[list[float]] = []
         if candidates:

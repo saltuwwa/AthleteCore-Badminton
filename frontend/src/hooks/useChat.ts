@@ -1,13 +1,28 @@
 import axios from 'axios'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { sendMessage } from '../api/chat'
-import { agentLabel, mapAnalysisToMessage, mapAnalysisToRows } from '../lib/chatMappers'
+import {
+  agentLabel,
+  mapAnalysisToMessage,
+  mapAnalysisToRows,
+  mapChatActions,
+  mapStructuredAnalysis,
+} from '../lib/chatMappers'
+import {
+  clearChatHistory,
+  loadChatHistory,
+  saveChatHistory,
+} from '../lib/chatHistoryStorage'
 import { stripAnalysisJsonFromText } from '../lib/stripAnalysisJson'
 import type { AnalysisErrorRow } from '../lib/chatMappers'
 import type { ChatMessage } from '../types'
 
 const THREAD_KEY = 'athletecore-thread-id'
-const VOICE_DRAFT_ID = 'voice-draft'
+
+export type UseChatOptions = {
+  /** Persist visible messages to localStorage (Chat page only). */
+  persistHistory?: boolean
+}
 
 const chatErrorMessage = (err: unknown): string => {
   if (axios.isAxiosError(err)) {
@@ -25,7 +40,7 @@ const chatErrorMessage = (err: unknown): string => {
   return err instanceof Error ? err.message : 'Неизвестная ошибка'
 }
 
-const welcomeMessage = (): ChatMessage => {
+export const welcomeMessage = (): ChatMessage => {
   const now = new Date()
   const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   return {
@@ -38,33 +53,49 @@ const welcomeMessage = (): ChatMessage => {
   }
 }
 
-export const useChat = () => {
-  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage()])
+const initialMessages = (persistHistory: boolean): ChatMessage[] => {
+  if (persistHistory) {
+    const restored = loadChatHistory()
+    if (restored?.length) {
+      return restored
+    }
+  }
+  return [welcomeMessage()]
+}
+
+export const useChat = (options?: UseChatOptions) => {
+  const persistHistory = options?.persistHistory ?? false
+
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    initialMessages(persistHistory),
+  )
   const [isSending, setIsSending] = useState(false)
   const [threadId, setThreadId] = useState<string | null>(() => sessionStorage.getItem(THREAD_KEY))
   const [needsMemory, setNeedsMemory] = useState<boolean | null>(null)
   const [lastAgents, setLastAgents] = useState<string[]>([])
   const [analysisRows, setAnalysisRows] = useState<AnalysisErrorRow[]>([])
 
-  const showVoiceDraft = useCallback((text: string) => {
-    const trimmed = text.trim()
-    if (!trimmed) return
-    const now = new Date()
-    const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-    const draft: ChatMessage = {
-      id: VOICE_DRAFT_ID,
-      role: 'user',
-      agentLabel: 'ГОЛОС · черновик',
-      timestamp: ts,
-      content: trimmed,
-      draft: true,
-    }
-    setMessages((prev) => [...prev.filter((m) => m.id !== VOICE_DRAFT_ID), draft])
-  }, [])
+  useEffect(() => {
+    if (!persistHistory) return
+    saveChatHistory(messages)
+  }, [messages, persistHistory])
 
-  const clearVoiceDraft = useCallback(() => {
-    setMessages((prev) => prev.filter((m) => m.id !== VOICE_DRAFT_ID))
-  }, [])
+  const clearChat = useCallback(() => {
+    if (persistHistory) {
+      clearChatHistory()
+    }
+    try {
+      sessionStorage.removeItem(THREAD_KEY)
+    } catch {
+      // ignore
+    }
+    setMessages([welcomeMessage()])
+    setThreadId(null)
+    setNeedsMemory(null)
+    setLastAgents([])
+    setAnalysisRows([])
+    setIsSending(false)
+  }, [persistHistory])
 
   const addAiMessage = useCallback((content: string) => {
     const trimmed = content.trim()
@@ -90,8 +121,6 @@ export const useChat = () => {
     const mm = String(now.getMinutes()).padStart(2, '0')
     const ts = `${hh}:${mm}`
 
-    setMessages((prev) => prev.filter((m) => m.id !== VOICE_DRAFT_ID))
-
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -111,21 +140,32 @@ export const useChat = () => {
     setMessages((prev) => [...prev, userMessage, processingMessage])
     setIsSending(true)
 
+    const sendClickedAt = performance.now()
+    const requestStartAt = performance.now()
+
     try {
       const response = await sendMessage(text, { threadId: threadId ?? undefined })
+      const responseReceivedAt = performance.now()
       if (response.thread_id) {
         setThreadId(response.thread_id)
         sessionStorage.setItem(THREAD_KEY, response.thread_id)
       }
       setNeedsMemory(response.needs_memory)
       setLastAgents(response.agents_used ?? [])
-      setAnalysisRows(mapAnalysisToRows(response.analysis))
+      setAnalysisRows(
+        response.comparison_status === 'not_found' ? [] : mapAnalysisToRows(response.analysis),
+      )
 
       const label = agentLabel(response.agents_used)
-      const analysis = mapAnalysisToMessage(response.analysis)
-      const visibleMessage = response.analysis
-        ? stripAnalysisJsonFromText(response.message)
-        : response.message
+      const blockedNotFound = response.comparison_status === 'not_found'
+      const structured = blockedNotFound ? undefined : mapStructuredAnalysis(response.analysis)
+      const analysis = structured ? undefined : mapAnalysisToMessage(response.analysis)
+      const visibleMessage =
+        structured || blockedNotFound
+          ? response.message
+          : response.analysis
+            ? stripAnalysisJsonFromText(response.message)
+            : response.message
 
       setMessages((prev) =>
         prev.map((msg) =>
@@ -136,10 +176,34 @@ export const useChat = () => {
                 agentLabel: label,
                 content: visibleMessage,
                 analysis,
+                structured,
+                chatActions: mapChatActions(response.chat_actions),
+                comparisonStatus: response.comparison_status ?? undefined,
               }
             : msg,
         ),
       )
+
+      const renderDoneAt = performance.now()
+      const clientTotalMs = Math.round(renderDoneAt - sendClickedAt)
+      const backendTotalMs = response.latency_trace?.total_ms
+      const networkPlusRenderMs =
+        backendTotalMs != null
+          ? Math.round(clientTotalMs - backendTotalMs)
+          : Math.round(responseReceivedAt - requestStartAt)
+
+      if (import.meta.env.DEV) {
+        console.log('[chat latency]', {
+          request_id: response.latency_trace?.request_id ?? null,
+          backend_total_ms: backendTotalMs ?? null,
+          client_total_ms: clientTotalMs,
+          network_plus_render_ms: networkPlusRenderMs,
+          send_clicked_at: sendClickedAt,
+          request_start: requestStartAt,
+          response_received: responseReceivedAt,
+          render_done: renderDoneAt,
+        })
+      }
     } catch (err) {
       setMessages((prev) =>
         prev.map((msg) =>
@@ -163,26 +227,14 @@ export const useChat = () => {
     () => ({
       messages,
       send,
-      showVoiceDraft,
-      clearVoiceDraft,
       isSending,
       threadId,
       needsMemory,
       lastAgents,
       analysisRows,
       addAiMessage,
+      clearChat,
     }),
-    [
-      messages,
-      send,
-      showVoiceDraft,
-      clearVoiceDraft,
-      isSending,
-      threadId,
-      needsMemory,
-      lastAgents,
-      analysisRows,
-      addAiMessage,
-    ],
+    [messages, send, isSending, threadId, needsMemory, lastAgents, analysisRows, addAiMessage, clearChat],
   )
 }

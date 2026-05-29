@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   analyzeVideo,
   detectPlayers,
@@ -44,8 +44,13 @@ function formatFatigue(minute: number | null | undefined) {
   return `~${minute} мин`
 }
 
+const VIDEO_DEBUG =
+  import.meta.env.DEV || (typeof localStorage !== 'undefined' && localStorage.getItem('video_debug') === '1')
+
 export const VideoAnalysisPage = () => {
   const fileRef = useRef<HTMLInputElement>(null)
+  const [searchParams] = useSearchParams()
+  const debugMode = VIDEO_DEBUG || searchParams.get('debug') === '1'
   const [step, setStep] = useState<0 | 1 | 2>(0)
   const [memoryOpen, setMemoryOpen] = useState(false)
 
@@ -73,7 +78,7 @@ export const VideoAnalysisPage = () => {
     setDetecting(true)
     setDetectError(null)
     try {
-      const res = await detectPlayers(id)
+      const res = await detectPlayers(id, matchType)
       setPlayers(res.players)
       setPreview(res.preview_frame_base64)
       if (res.players.length > 0) {
@@ -84,7 +89,7 @@ export const VideoAnalysisPage = () => {
     } finally {
       setDetecting(false)
     }
-  }, [])
+  }, [matchType])
 
   useEffect(() => {
     if (step === 1 && videoId && players.length === 0 && !detecting && !detectError) {
@@ -138,6 +143,7 @@ export const VideoAnalysisPage = () => {
         video_id: videoId,
         match_type: matchType,
         target_track_ids: matchType === 'singles' ? [selectedIds[0]] : selectedIds.slice(0, 2),
+        debug: debugMode,
       })
       setResult(res)
       setStep(2)
@@ -152,9 +158,6 @@ export const VideoAnalysisPage = () => {
 
   const primary = result?.metrics.singles ?? result?.metrics.doubles?.players?.[0]
   const mem = result?.memory_summary
-  const segRatio = result?.metrics.raw_notes?.gameplay_segment_ratio
-  const segWarning = result?.metrics.raw_notes?.segment_warning
-  const excludedRepeatsAndPauses = result?.metrics.raw_notes?.excluded_replays_and_pauses
 
   return (
     <div className="thin-scrollbar flex h-full flex-col overflow-y-auto">
@@ -342,6 +345,21 @@ export const VideoAnalysisPage = () => {
             animate={{ opacity: 1, y: 0 }}
             className="space-y-6"
           >
+            {result.metrics.segment_filter && (
+              <GameplayCoverageNote filter={result.metrics.segment_filter} />
+            )}
+
+            {debugMode && result.debug_report_id && (
+              <div className="flex justify-end">
+                <Link
+                  to={`/analysis/video/${result.video_id}/debug`}
+                  className="rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-4 py-2 text-[12px] font-medium text-[var(--accent-strong)] hover:bg-[var(--accent)]/15"
+                >
+                  Debug analysis
+                </Link>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <MetricTile
                 label="Скорость"
@@ -366,20 +384,6 @@ export const VideoAnalysisPage = () => {
                 hint="Прошлых разборов"
               />
             </div>
-
-            {segRatio != null ? (
-              <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3">
-                <p className="font-mono-ui text-[11px] text-[var(--muted)]">
-                  Проанализировано игровых моментов: {Math.round(segRatio * 100)}%
-                </p>
-                <p className="mt-1 text-[12px] text-[var(--text-soft)]">
-                  {excludedRepeatsAndPauses ? 'Повторы и паузы исключены' : 'Повторы и паузы не найдены'}
-                </p>
-                {segWarning ? (
-                  <p className="mt-1 text-[12px] text-[var(--accent3)]">{segWarning}</p>
-                ) : null}
-              </div>
-            ) : null}
 
             <ResultBlock title="Главный вывод">
               <p className="text-[14px] leading-relaxed text-[var(--text-soft)]">
@@ -512,6 +516,63 @@ export const VideoAnalysisPage = () => {
       </footer>
 
       <MemoryModal open={memoryOpen} onClose={() => setMemoryOpen(false)} />
+    </div>
+  )
+}
+
+function GameplayCoverageNote({
+  filter,
+}: {
+  filter: NonNullable<AnalyzeVideoResponse['metrics']['segment_filter']>
+}) {
+  const [open, setOpen] = useState(false)
+  const pct = Math.round((filter.valid_gameplay_ratio ?? 0) * 100)
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3">
+      <p className="text-[12px] text-[var(--text-soft)]">
+        Проанализировано игровых моментов: <span className="font-semibold">{pct}%</span>
+      </p>
+      <p className="mt-0.5 text-[11px] text-[var(--muted2)]">Повторы и паузы исключены</p>
+      {filter.warning && (
+        <p className="mt-2 text-[11px] text-[var(--accent3)]">{filter.warning}</p>
+      )}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mt-2 text-[10px] text-[var(--accent)] underline-offset-2 hover:underline"
+      >
+        {open ? 'Скрыть детали' : 'Подробнее'}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2 border-t border-[var(--border)] pt-2 text-[11px] text-[var(--muted2)]">
+          <p>Уверенность анализа: {Math.round((filter.analysis_confidence ?? 0) * 100)}%</p>
+          {filter.valid_segments.length > 0 && (
+            <div>
+              <p className="text-[var(--muted)]">Игровые отрезки</p>
+              <ul className="mt-1 space-y-0.5">
+                {filter.valid_segments.map((s, i) => (
+                  <li key={i}>
+                    {s.start} — {s.end}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {filter.ignored_segments.length > 0 && (
+            <div>
+              <p className="text-[var(--muted)]">Исключено</p>
+              <ul className="mt-1 space-y-0.5">
+                {filter.ignored_segments.map((s, i) => (
+                  <li key={i}>
+                    {s.start} — {s.end} ({s.reason})
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

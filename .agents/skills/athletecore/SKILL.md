@@ -70,7 +70,7 @@ See `references/memory-gate.md`.
 
 ## Ingest new coaching PDFs
 
-See `references/rag-ingest.md` — LlamaParse → `output/*.md` → chunks → (future) Qdrant `sports_methodology`.
+See `references/rag-ingest.md` — LlamaParse → `output/*.md` → chunks → Qdrant `sports_methodology` (`scripts/ingest_methodology_qdrant.py`).
 
 ## Run locally
 

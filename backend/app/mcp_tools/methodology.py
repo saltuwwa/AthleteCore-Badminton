@@ -61,6 +61,28 @@ def _load_chunks() -> list[MethodologyChunk]:
     return _CHUNK_CACHE
 
 
+_last_retrieval_debug: dict | None = None
+
+
+def get_methodology_retrieval_debug() -> dict | None:
+    """Debug payload from the most recent search_sports_methodology call."""
+    return _last_retrieval_debug
+
+
+def _apply_relevance_filter(
+    query: str,
+    candidates: list[dict],
+    *,
+    top_k: int,
+) -> list[dict]:
+    from app.rag.relevance_filter import filter_methodology_hits
+
+    global _last_retrieval_debug
+    accepted, debug = filter_methodology_hits(query, candidates, top_k=top_k)
+    _last_retrieval_debug = debug
+    return accepted
+
+
 def _search_lexical(
     query: str,
     *,
@@ -101,8 +123,9 @@ def _search_lexical(
             scored.append((score, ch))
 
     scored.sort(key=lambda x: x[0], reverse=True)
+    pool_k = max(top_k * 4, 12)
     results: list[dict] = []
-    for score, ch in scored[:top_k]:
+    for score, ch in scored[:pool_k]:
         snippet = ch.text.replace("\n", " ").strip()
         if len(snippet) > 600:
             snippet = snippet[:597] + "..."
@@ -112,10 +135,11 @@ def _search_lexical(
                 "page": ch.page_hint,
                 "score": round(score, 3),
                 "snippet": snippet,
+                "snippet_full": ch.text,
                 "retrieval": "lexical",
             }
         )
-    return results
+    return _apply_relevance_filter(query, results, top_k=top_k)
 
 
 def search_sports_methodology(
@@ -128,22 +152,52 @@ def search_sports_methodology(
     Return ranked snippets from sports methodology books for RAG-style grounding.
 
     Each item: source, page, score, snippet, retrieval (qdrant|lexical).
+    Irrelevant / off-domain queries return [] (see get_methodology_retrieval_debug).
     """
+    global _last_retrieval_debug
+    query = (query or "").strip()
+    if not query:
+        _last_retrieval_debug = {"query": "", "rejection_reason": "empty_query"}
+        return []
+
+    from app.cache.methodology_cache import (
+        cache_key as methodology_cache_key,
+        get_cached_hits,
+        set_cached_hits,
+    )
+
+    mkey = methodology_cache_key(query, top_k=top_k)
+    cached_hits = get_cached_hits(mkey)
+    if cached_hits is not None:
+        return cached_hits
+
     if settings.methodology_use_qdrant:
         try:
             from app.rag.retrieve import qdrant_available, search_methodology_rag
 
             if qdrant_available():
-                hits = search_methodology_rag(
-                    query, top_k=top_k, sources=sources
+                raw = search_methodology_rag(
+                    query, top_k=max(top_k * 4, 12), sources=sources
                 )
-                if hits:
+                if raw:
+                    hits = _apply_relevance_filter(query, raw, top_k=top_k)
+                    set_cached_hits(mkey, hits)
                     return hits
         except Exception:
             pass
 
     if settings.methodology_fallback_lexical:
-        return _search_lexical(query, top_k=top_k, sources=sources)
+        hits = _search_lexical(query, top_k=top_k, sources=sources)
+        set_cached_hits(mkey, hits)
+        return hits
+
+    from app.rag.relevance_filter import assess_query_domain
+
+    _last_retrieval_debug = {
+        **assess_query_domain(query),
+        "rejection_reason": "no_retrieval_backend",
+        "accepted_hits_count": 0,
+    }
     return []
 
 

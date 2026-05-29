@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from contextlib import nullcontext
 from typing import Any
 
 from app.config import Settings, settings
+from app.graph.latency_trace import current_latency_trace, stage_span
 
 
 def _litellm_model(model: str, cfg: Settings) -> tuple[str, str | None]:
@@ -21,6 +24,8 @@ async def acompletion(
     messages: list[dict[str, str]],
     temperature: float = 0.2,
     app_settings: Settings | None = None,
+    latency_name: str | None = None,
+    latency_stage: str | None = None,
 ) -> str:
     """LiteLLM gateway with OpenAI / Anthropic keys from settings."""
     cfg = app_settings or settings
@@ -30,13 +35,63 @@ async def acompletion(
     if not api_key:
         raise RuntimeError(f"No API key configured for model {model}")
 
-    resp = await litellm.acompletion(
-        model=litellm_model,
-        messages=messages,
-        temperature=temperature,
-        api_key=api_key,
-    )
-    return (resp.choices[0].message.content or "").strip()
+    from app.observability.langfuse_tracing import record_langfuse_generation
+
+    prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+    stage = latency_stage
+    if stage is None and latency_name:
+        stage = "semantic_router" if latency_name == "semantic_router" else "agent_llm"
+
+    gen_name = latency_name or stage or "llm"
+    ctx = stage_span(stage) if stage else nullcontext()
+    t0 = time.perf_counter()
+    duration_ms = 0.0
+    content = ""
+    usage_payload: dict[str, Any] | None = None
+    err_msg: str | None = None
+    with ctx:
+        try:
+            resp = await litellm.acompletion(
+                model=litellm_model,
+                messages=messages,
+                temperature=temperature,
+                api_key=api_key,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            u = getattr(resp, "usage", None)
+            if u is not None:
+                usage_payload = {
+                    "input": getattr(u, "prompt_tokens", None) or (u.get("prompt_tokens") if isinstance(u, dict) else None),
+                    "output": getattr(u, "completion_tokens", None) or (u.get("completion_tokens") if isinstance(u, dict) else None),
+                    "total": getattr(u, "total_tokens", None) or (u.get("total_tokens") if isinstance(u, dict) else None),
+                }
+        except Exception as exc:
+            err_msg = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            duration_ms = (time.perf_counter() - t0) * 1000
+            record_langfuse_generation(
+                name=gen_name,
+                model=model,
+                messages=messages,
+                output=content,
+                duration_ms=duration_ms,
+                temperature=temperature,
+                usage=usage_payload,
+                error=err_msg,
+                cfg=cfg,
+            )
+
+    trace = current_latency_trace()
+    if trace and latency_name:
+        trace.record_llm_call(
+            name=latency_name,
+            model=model,
+            duration_ms=duration_ms,
+            prompt_chars=prompt_chars,
+            completion_chars=len(content),
+        )
+    return content
 
 
 def resolve_analyst_model(cfg: Settings) -> str:
@@ -155,7 +210,9 @@ def extract_analysis_json(text: str) -> dict[str, Any] | None:
     match = re.search(r"```json\s*([\s\S]*?)\s*```", text)
     blob = match.group(1) if match else None
     if not blob:
-        match = re.search(r'\{[\s\S]*"errors"[\s\S]*\}', text)
+        match = re.search(
+            r'\{[\s\S]*"(?:errors|summary)"[\s\S]*\}', text
+        )
         blob = match.group() if match else None
     if not blob:
         return None
@@ -170,6 +227,8 @@ def strip_analysis_json_from_text(text: str) -> str:
     if not text:
         return text
     cleaned = re.sub(r"```json\s*[\s\S]*?\s*```", "", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\{[\s\S]*"errors"[\s\S]*\}', "", cleaned)
+    cleaned = re.sub(
+        r'\{[\s\S]*"(?:errors|summary)"[\s\S]*\}', "", cleaned
+    )
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()

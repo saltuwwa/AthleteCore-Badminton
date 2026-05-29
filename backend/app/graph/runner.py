@@ -6,12 +6,20 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from langgraph.types import Overwrite
+
 from app.config import settings
 from app.graph.build import get_compiled_graph
-from app.graph.llm import extract_analysis_json, strip_analysis_json_from_text
+from app.graph.latency_trace import stage_span
+from app.graph.response_assembly import (
+    assert_past_event_api_invariant,
+    assemble_chat_payload,
+    enforce_blocked_past_event_response,
+)
 from app.graph.state import AthleteGraphState
 from app.memory.embeddings import embed_texts, openai_client
-from app.memory.extraction import extract_memories_from_turn
+from app.memory.extraction import concat_user_text, extract_memories_from_turn
+from app.memory.write_enrichment import enrich_candidates_for_turn
 from app.memory.models import Turn
 from app.memory.supersession import apply_supersession_and_insert
 from app.memory.write_gate import MemoryWriteGate
@@ -49,51 +57,69 @@ async def run_chat_graph(
         }
     }
 
+    from app.graph.pending_followup import get_thread_pending_followup
+
     prior_offer: str | None = None
+    prior_pending: dict[str, Any] | None = None
     try:
         snap = await graph.aget_state(config)
         if snap and snap.values:
             prior_offer = snap.values.get("offer_followup")
+            prior_pending = snap.values.get("pending_followup")
     except Exception:
         prior_offer = None
+        prior_pending = None
+    if not prior_pending:
+        prior_pending = get_thread_pending_followup(tid)
 
+    # Overwrite only for reducer fields (operator.add). Plain values for dict/scalars —
+    # Overwrite({}) is truthy and breaks `state.get("turn_decision") or {}`.
     initial: AthleteGraphState = {
         "thread_id": tid,
         "user_id": user_id,
         "session_id": session_id,
         "user_input": message,
-        "agent_outputs": [],
+        "agent_outputs": Overwrite([]),  # type: ignore[typeddict-item]
         "agents_used": [],
+        "analyst_trace": None,
+        "llm_called": False,
+        "final_response": "",
+        "memory_context": "",
+        "memory_citations": [],
+        "turn_decision": {},
         "requires_human_confirmation": False,
-        "offer_followup": prior_offer,
     }
+    # Do not pass None — LangGraph input would wipe checkpointed follow-up state.
+    if prior_offer is not None:
+        initial["offer_followup"] = prior_offer
+    if prior_pending is not None:
+        initial["pending_followup"] = prior_pending
 
-    result = await graph.ainvoke(initial, config)
+    with stage_span("graph_invoke"):
+        result = await graph.ainvoke(initial, config)
 
-    final = result.get("final_response") or "Ответ не сформирован."
-    agents_used = result.get("agents_used") or []
-    outputs = result.get("agent_outputs") or []
-    analysis = None
-    for out in outputs:
-        if out.get("agent") == "analyst":
-            analysis = out.get("analysis") or extract_analysis_json(out.get("content", ""))
-            break
+    with stage_span("response_assembly"):
+        assembled = assemble_chat_payload(result)
+        assembled = enforce_blocked_past_event_response(assembled)
+        assert_past_event_api_invariant(assembled)
 
-    if analysis:
-        final = strip_analysis_json_from_text(final)
-
-    needs_memory = bool(result.get("needs_memory"))
-    interaction_mode = result.get("interaction_mode") or "neutral"
+    final = assembled["message"]
+    needs_memory = assembled["needs_memory"]
+    interaction_mode = assembled["interaction_mode"]
     offer_followup = result.get("offer_followup")
 
-    if needs_memory:
-        await _persist_turn_memories(
-            db,
-            user_id=user_id,
-            session_id=session_id,
-            user_message=message,
-            assistant_message=final,
-        )
+    persist_memory = bool(result.get("persist_memory"))
+    memory_write_scheduled = False
+    memory_write_payload: dict[str, Any] | None = None
+    if persist_memory:
+        memory_write_scheduled = True
+        memory_write_payload = {
+            "user_id": user_id,
+            "session_id": session_id,
+            "user_message": message,
+            "assistant_message": final,
+            "turn_decision": result.get("turn_decision") or {},
+        }
 
     await _persist_interaction_offer(
         db,
@@ -104,14 +130,11 @@ async def run_chat_graph(
     )
 
     return {
-        "message": final,
         "thread_id": tid,
-        "agents_used": agents_used,
-        "requires_confirmation": bool(result.get("requires_human_confirmation")),
-        "analysis": analysis,
-        "needs_memory": needs_memory,
-        "interaction_mode": interaction_mode,
-        "memory_citations_count": len(result.get("memory_citations") or []),
+        "debug_build_id": "semantic-router-v1",
+        "memory_write_scheduled": memory_write_scheduled,
+        "memory_write_payload": memory_write_payload,
+        **assembled,
     }
 
 
@@ -142,10 +165,20 @@ async def _persist_turn_memories(
 
     try:
         client = openai_client(settings)
+        user_text = concat_user_text(turn.messages)
         candidates = await extract_memories_from_turn(
-            client, settings, turn.messages
+            client,
+            settings,
+            turn.messages,
+            reference_date=turn.turn_timestamp,
         )
-        candidates = _write_gate.filter_candidates(candidates)
+        candidates = enrich_candidates_for_turn(
+            candidates,
+            raw_user_text=user_text,
+            turn_timestamp=turn.turn_timestamp,
+            timezone=settings.memory_timezone,
+        )
+        candidates = _write_gate.filter_candidates(candidates, raw_user_text=user_text)
         if not candidates:
             await db.commit()
             return

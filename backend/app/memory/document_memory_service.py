@@ -42,10 +42,14 @@ def payload_to_memory_candidate(
     payload: dict[str, Any],
     document_id: str,
 ) -> dict[str, Any]:
+    from app.memory.constants import SOURCE_DOCUMENT_PIPELINE, SESSION_TOURNAMENT
+    from app.memory.date_normalizer import parse_iso_date
+
     summary = (
         f"Tournament doc: {payload.get('tournament_name') or 'unknown'} "
         f"({len(payload.get('match_list') or [])} matches)"
     )
+    event_d = parse_iso_date(payload.get("date"))
     return {
         "type": "event",
         "key": f"competition.document.{document_id}",
@@ -54,9 +58,16 @@ def payload_to_memory_candidate(
         "supersedes_same_key": True,
         "memory_layer": "episodic",
         "event_type": "competition_document_analysis",
+        "session_type": SESSION_TOURNAMENT,
         "importance": 0.72,
         "is_repeated_pattern": False,
         "payload": payload,
+        "source": SOURCE_DOCUMENT_PIPELINE,
+        "event_date": event_d,
+        "facts": {
+            "tournament_name": payload.get("tournament_name"),
+            "match_count": len(payload.get("match_list") or []),
+        },
     }
 
 

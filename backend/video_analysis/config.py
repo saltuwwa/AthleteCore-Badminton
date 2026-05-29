@@ -21,8 +21,19 @@ class VideoAnalysisSettings(BaseSettings):
     allowed_video_extensions: str = ".mp4,.mov,.avi,.mkv,.webm"
 
     google_api_key: str | None = None
-    video_feedback_model: str = "gemini-2.0-flash"
+    # Preferred explicit setting for video feedback model
+    video_feedback_model: str | None = None
+    # Global Gemini fallback, e.g. GEMINI_MODEL=gemini-2.5-flash
+    gemini_model: str | None = None
     methodology_rag_top_k: int = 5
+
+    @property
+    def video_feedback_model_resolved(self) -> str:
+        return (
+            self.video_feedback_model
+            or self.gemini_model
+            or "gemini-2.5-flash"
+        )
 
     @property
     def storage_root(self) -> Path:

@@ -34,6 +34,7 @@ class StructuredCompetitionData(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
     security_flag: str | None = None
     security_notice: str | None = None
+    parse_debug: dict[str, Any] | None = None
 
 
 class DocumentAnalyzeRequest(BaseModel):

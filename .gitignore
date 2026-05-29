@@ -42,9 +42,19 @@ output/
 qdrant_data/
 backend/data/videos/
 backend/data/documents/
+backend/reports/video_debug/
 
 # Temp / backup
 _course_tz_extract.txt
 .$*
 *.dtmp
 *.bkp
+
+# Personal defense notes (local only)
+PRESENTATION_BRIEF.md
+CHECKLIST.md
+DEFENSE_PREPARATION.md
+
+# Local ML weights & eval run artifacts
+backend/yolov8n-pose.pt
+backend/reports/

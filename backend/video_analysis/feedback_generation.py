@@ -42,22 +42,92 @@ def _build_rag_query(metrics: VideoMetricsSummary, memory_ctx: Any | None) -> st
 def fetch_methodology_context(
     metrics: VideoMetricsSummary,
     memory_ctx: Any | None = None,
-) -> tuple[str, list[str]]:
+    *,
+    return_hits: bool = False,
+) -> tuple[str, list[str]] | tuple[str, list[str], list[dict[str, Any]]]:
     try:
         from app.mcp_tools.methodology import format_methodology_context, search_sports_methodology
     except ImportError:
+        if return_hits:
+            return "", [], []
         return "", []
 
     query = _build_rag_query(metrics, memory_ctx)
     hits = search_sports_methodology(query, top_k=video_settings.methodology_rag_top_k)
     if not hits:
+        if return_hits:
+            return "", [], []
         return "", []
     sources = sorted({h.get("source", "") for h in hits if h.get("source")})
-    return format_methodology_context(hits), sources
+    ctx = format_methodology_context(hits)
+    if return_hits:
+        chunk_debug = [
+            {
+                "source": h.get("source", ""),
+                "title": h.get("title") or h.get("metadata", {}).get("title", ""),
+                "score": h.get("score"),
+                "why_retrieved": f"query match: {query[:120]}",
+                "excerpt_preview": (h.get("text") or h.get("content") or "")[:200],
+            }
+            for h in hits
+        ]
+        return ctx, sources, chunk_debug
+    return ctx, sources
 
 
 def _metrics_to_prompt(metrics: VideoMetricsSummary) -> str:
     return json.dumps(metrics.model_dump(mode="json"), ensure_ascii=False, indent=2)
+
+
+def build_gemini_payload(
+    metrics: VideoMetricsSummary,
+    memory_ctx: VideoMemoryContext | None = None,
+    *,
+    methodology_ctx: str = "",
+    methodology_sources: list[str] | None = None,
+) -> dict[str, Any]:
+    """Exact structured payload sent to Gemini (no raw video, no secrets)."""
+    segment_summary = None
+    if metrics.segment_filter:
+        segment_summary = {
+            "valid_gameplay_ratio": metrics.segment_filter.valid_gameplay_ratio,
+            "valid_segments": [s.model_dump() for s in metrics.segment_filter.valid_segments],
+            "ignored_segments": [s.model_dump() for s in metrics.segment_filter.ignored_segments],
+            "warning": metrics.segment_filter.warning,
+        }
+
+    user_parts = [
+        "## Current video metrics JSON (pose-based, approximate)",
+        _metrics_to_prompt(metrics),
+    ]
+    memory_block = ""
+    if memory_ctx is not None:
+        memory_block = memory_ctx.format_for_prompt()
+        if memory_block.strip():
+            user_parts.append("## Athlete video memory (LTM)")
+            user_parts.append(memory_block)
+    if methodology_ctx:
+        user_parts.append("## Methodology context (RAG from coaching books)")
+        user_parts.append(methodology_ctx)
+
+    return {
+        "model": video_settings.video_feedback_model_resolved,
+        "system_instruction_summary": (
+            "AthleteCore badminton coaching assistant; Russian output; JSON only; "
+            "no raw video; cautious approximate pose metrics language."
+        ),
+        "target_athlete": {
+            "match_type": metrics.match_type,
+            "target_track_ids": metrics.target_track_ids,
+        },
+        "valid_segments_summary": segment_summary,
+        "metrics_json": metrics.model_dump(mode="json"),
+        "memory_context_text": memory_block or None,
+        "rag_context_text": methodology_ctx or None,
+        "rag_sources": methodology_sources or [],
+        "user_message": "\n\n".join(user_parts),
+        "generation_config": {"temperature": 0.35, "response_mime_type": "application/json"},
+    }
 
 
 def _parse_gemini_json(text: str) -> dict[str, Any]:
@@ -78,7 +148,9 @@ def _parse_gemini_json(text: str) -> dict[str, Any]:
 def generate_coaching_feedback(
     metrics: VideoMetricsSummary,
     memory_ctx: VideoMemoryContext | None = None,
-) -> CoachingFeedback:
+    *,
+    return_debug: bool = False,
+) -> CoachingFeedback | tuple[CoachingFeedback, dict[str, Any]]:
     api_key = video_settings.google_api_key
     if not api_key:
         raise HTTPException(
@@ -86,7 +158,16 @@ def generate_coaching_feedback(
             detail="GOOGLE_API_KEY not configured for video coaching feedback",
         )
 
-    methodology_ctx, sources = fetch_methodology_context(metrics, memory_ctx)
+    rag_hits_debug: list[dict[str, Any]] = []
+    if return_debug:
+        methodology_ctx, sources, rag_hits_debug = fetch_methodology_context(  # type: ignore[misc]
+            metrics, memory_ctx, return_hits=True
+        )
+    else:
+        methodology_ctx, sources = fetch_methodology_context(metrics, memory_ctx)
+    gemini_payload = build_gemini_payload(
+        metrics, memory_ctx, methodology_ctx=methodology_ctx, methodology_sources=sources
+    )
 
     system = """You are AthleteCore badminton coaching assistant.
 You receive structured pose-tracking metrics JSON for the CURRENT video (not raw video).
@@ -114,20 +195,7 @@ Rules:
   next_training_focus (string)
 """
 
-    user_parts = [
-        "## Current video metrics JSON (pose-based, approximate)",
-        _metrics_to_prompt(metrics),
-    ]
-    if memory_ctx is not None:
-        mem_block = memory_ctx.format_for_prompt()
-        if mem_block.strip():
-            user_parts.append("## Athlete video memory (LTM)")
-            user_parts.append(mem_block)
-    if methodology_ctx:
-        user_parts.append("## Methodology context (RAG from coaching books)")
-        user_parts.append(methodology_ctx)
-
-    user_blob = "\n\n".join(user_parts)
+    user_blob = gemini_payload["user_message"]
 
     try:
         import google.generativeai as genai  # type: ignore[import-untyped]
@@ -139,7 +207,7 @@ Rules:
 
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
-        video_settings.video_feedback_model,
+        video_settings.video_feedback_model_resolved,
         system_instruction=system,
     )
     response = model.generate_content(
@@ -171,7 +239,7 @@ Rules:
             return [v]
         return [str(x) for x in v][:6]
 
-    return CoachingFeedback(
+    feedback = CoachingFeedback(
         short_summary=str(data.get("short_summary", "Краткий разбор на основе pose-метрик.")),
         key_timeline_moments=[str(x) for x in (data.get("key_timeline_moments") or [])][:8],
         speed_trend=str(data.get("speed_trend", "Тренд скорости оценён по видимому движению.")),
@@ -196,3 +264,13 @@ Rules:
         methodology_sources_used=sources,
         disclaimer=COACHING_DISCLAIMER,
     )
+    if return_debug:
+        debug_info = {
+            "gemini_input": gemini_payload,
+            "gemini_raw_response": raw,
+            "parsed_feedback": feedback.model_dump(mode="json"),
+            "methodology_sources": sources,
+            "rag_hits": rag_hits_debug,
+        }
+        return feedback, debug_info
+    return feedback
