@@ -33,6 +33,7 @@ logs/
 graph_checkpoints.sqlite*
 
 # IDE / OS
+.cursor/
 .DS_Store
 Thumbs.db
 
