@@ -4,7 +4,7 @@ Honest roadmap aligned with current MVP and [CHECKLIST.md](CHECKLIST.md).
 
 ---
 
-## 1. Current MVP (course defense)
+## 1. Current MVP
 
 - [x] LangGraph multi-agent chat with semantic router
 - [x] SQLite LTM + write-gate + past-event guard
